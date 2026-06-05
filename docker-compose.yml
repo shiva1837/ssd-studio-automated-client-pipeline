@@ -1,0 +1,126 @@
+version: "3.9"
+
+# ============================================================
+# SSD STUDIO — LOCAL DEVELOPMENT ORCHESTRATION
+# ============================================================
+
+networks:
+  ssd_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  n8n_data:
+    driver: local
+  redis_data:
+    driver: local
+
+services:
+  # ----------------------------------------------------------
+  # PostgreSQL — Primary Relational Database
+  # ----------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: ssd_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ssd_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ssd_password}
+      POSTGRES_DB: ${POSTGRES_DB:-ssd_studio_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./packages/db/init:/docker-entrypoint-initdb.d
+    networks:
+      - ssd_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ssd_user} -d ${POSTGRES_DB:-ssd_studio_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------
+  # Redis — Distributed Locking & Session Cache
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: ssd_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - ssd_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes
+
+  # ----------------------------------------------------------
+  # n8n — Workflow Orchestration Engine
+  # ----------------------------------------------------------
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: ssd_n8n
+    restart: unless-stopped
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n_db
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-ssd_user}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD:-ssd_password}
+      - N8N_BASIC_AUTH_ACTIVE=${N8N_BASIC_AUTH_ACTIVE:-true}
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD:-admin}
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=${N8N_WEBHOOK_URL:-http://localhost:5678}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-change-me-32-char-key}
+      - GENERIC_TIMEZONE=America/New_York
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./apps/orchestration/workflows:/home/node/.n8n/workflows
+    networks:
+      - ssd_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ----------------------------------------------------------
+  # FastMCP Agent Server — Python SSE-based MCP Server
+  # ----------------------------------------------------------
+  fastmcp:
+    build:
+      context: ./apps/agents
+      dockerfile: Dockerfile
+    container_name: ssd_fastmcp
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://ssd_user:ssd_password@postgres:5432/ssd_studio_db}
+      - MCP_SERVER_HOST=0.0.0.0
+      - MCP_SERVER_PORT=${MCP_SERVER_PORT:-8080}
+      - MCP_SECRET_KEY=${MCP_SECRET_KEY:-change-me-secret}
+      - HITL_HMAC_SECRET=${HITL_HMAC_SECRET:-change-me-hmac-secret}
+    ports:
+      - "${MCP_SERVER_PORT:-8080}:8080"
+    volumes:
+      - ./apps/agents:/app
+    networks:
+      - ssd_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
