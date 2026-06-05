@@ -1,0 +1,160 @@
+// ============================================================
+// SSD STUDIO — PRISMA DATABASE SCHEMA
+// PostgreSQL Relational Model for Booking Lifecycle
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+}
+
+enum AssetType {
+  UNEDITED
+  FINAL
+}
+
+enum DeliveryStatus {
+  PENDING
+  URL_GENERATED
+  DELIVERED
+}
+
+enum ServiceType {
+  PORTRAIT_SESSION
+  COMMERCIAL_SHOOT
+  EVENT_COVERAGE
+  BRAND_CAMPAIGN
+  PRODUCT_PHOTOGRAPHY
+  VIDEO_PRODUCTION
+}
+
+// ============================================================
+// USER MODEL
+// ============================================================
+
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  email     String   @unique
+  name      String
+  phone     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  bookings Booking[]
+
+  @@index([email])
+  @@map("users")
+}
+
+// ============================================================
+// BOOKING MODEL
+// ============================================================
+
+model Booking {
+  id          String        @id @default(uuid()) @db.Uuid
+  clientId    String        @db.Uuid
+  serviceType String
+  startTime   DateTime
+  endTime     DateTime
+  status      BookingStatus @default(PENDING)
+  amountPaid  Float         @default(0)
+
+  // Confirmation & Communication
+  confirmationSentAt  DateTime?
+  reminderSent48hAt   DateTime?
+  reminderSent24hAt   DateTime?
+  reminderSentDayOfAt DateTime?
+  followUpSentAt      DateTime?
+
+  // Metadata
+  notes          String?
+  internalNotes  String?
+  stripePaymentId String?
+  lockToken       String?   @unique
+  lockExpiresAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  client     User         @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  mediaAssets MediaAsset[]
+
+  @@index([clientId])
+  @@index([startTime])
+  @@index([status])
+  @@index([lockToken])
+  @@map("bookings")
+}
+
+// ============================================================
+// MEDIA ASSET MODEL
+// ============================================================
+
+model MediaAsset {
+  id             String         @id @default(uuid()) @db.Uuid
+  bookingId      String         @db.Uuid
+  s3ObjectKey    String
+  assetType      AssetType
+  deliveryStatus DeliveryStatus @default(PENDING)
+  expiresAt      DateTime?
+
+  // S3 Presigned URL cache
+  presignedUrl      String?
+  presignedUrlExpiry DateTime?
+
+  // Delivery tracking
+  deliveredAt       DateTime?
+  deliveryEmailSent Boolean   @default(false)
+
+  // File metadata
+  fileName   String?
+  fileSizeBytes BigInt?
+  mimeType   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@index([assetType])
+  @@index([deliveryStatus])
+  @@map("media_assets")
+}
+
+// ============================================================
+// AUDIT LOG MODEL — Tracks all lifecycle events
+// ============================================================
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  entityType String
+  entityId   String
+  action     String
+  actorId    String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
