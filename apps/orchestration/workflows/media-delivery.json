@@ -1,0 +1,336 @@
+{
+  "name": "SSD Studio — Media Delivery",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true
+  },
+  "meta": {
+    "description": "Triggered by 'media-ready' (S3 object created -> API generated a presigned URL). Emails the time-limited download link via Resend. RAW assets use a 12h link; FINAL assets use a 72h link and schedule a follow-up/review request 24h later."
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "media-ready",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "node-webhook-media",
+      "name": "Webhook: media-ready",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        400
+      ],
+      "webhookId": "media-ready"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.API_BASE_URL }}/api/internal/media/{{ $json.body.mediaAssetId }}",
+        "options": {
+          "timeout": 10000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-secret",
+              "value": "={{ $env.WEBHOOK_INTERNAL_SECRET }}"
+            }
+          ]
+        }
+      },
+      "id": "node-fetch-media",
+      "name": "Fetch Media + Booking",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        460,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.assetType }}",
+              "rightValue": "FINAL",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "node-if-final",
+      "name": "IF assetType = FINAL?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        680,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.RESEND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"from\": \"{{ $env.RESEND_FROM_EMAIL }}\",\n  \"to\": [\"{{ $json.booking.client.email }}\"],\n  \"subject\": \"Your final edited gallery is ready\",\n  \"html\": \"<h2>Your gallery is ready</h2><p>Hi {{ $json.booking.client.name }}, your final edited images are ready. This secure link is valid for 72 hours.</p><p><a href='{{ $json.presignedUrl }}'>Download your gallery</a></p>\"\n}"
+      },
+      "id": "node-email-final",
+      "name": "Resend: FINAL delivery (72h)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        920,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.RESEND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"from\": \"{{ $env.RESEND_FROM_EMAIL }}\",\n  \"to\": [\"{{ $json.booking.client.email }}\"],\n  \"subject\": \"Your unedited preview is ready\",\n  \"html\": \"<h2>Sneak peek!</h2><p>Hi {{ $json.booking.client.name }}, here are your unedited previews. This link is valid for 12 hours.</p><p><a href='{{ $json.presignedUrl }}'>View previews</a></p>\"\n}"
+      },
+      "id": "node-email-raw",
+      "name": "Resend: RAW delivery (12h)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        920,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/api/webhooks/n8n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-secret",
+              "value": "={{ $env.WEBHOOK_INTERNAL_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"bookingId\": \"{{ $json.booking.id }}\", \"stage\": \"MEDIA_DELIVERED\" }"
+      },
+      "id": "node-ack-delivered",
+      "name": "Ack: MEDIA_DELIVERED",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1160,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "unit": "hours",
+        "amount": 24
+      },
+      "id": "node-wait-followup",
+      "name": "Wait 24h (follow-up)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1380,
+        280
+      ],
+      "webhookId": "wait-followup"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.RESEND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"from\": \"{{ $env.RESEND_FROM_EMAIL }}\",\n  \"to\": [\"{{ $json.booking.client.email }}\"],\n  \"subject\": \"How did we do? Leave a quick review\",\n  \"html\": \"<p>Hi {{ $json.booking.client.name }}, we hope you love your photos! We'd be grateful for a quick review: <a href='{{ $env.REVIEW_URL }}'>Leave a review</a>.</p>\"\n}"
+      },
+      "id": "node-email-followup",
+      "name": "Resend: Follow-up / Review",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1600,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/api/webhooks/n8n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-secret",
+              "value": "={{ $env.WEBHOOK_INTERNAL_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"bookingId\": \"{{ $json.booking.id }}\", \"stage\": \"FOLLOW_UP\" }"
+      },
+      "id": "node-ack-followup",
+      "name": "Ack: FOLLOW_UP sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1820,
+        280
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: media-ready": {
+      "main": [
+        [
+          {
+            "node": "Fetch Media + Booking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Media + Booking": {
+      "main": [
+        [
+          {
+            "node": "IF assetType = FINAL?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF assetType = FINAL?": {
+      "main": [
+        [
+          {
+            "node": "Resend: FINAL delivery (72h)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Resend: RAW delivery (12h)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resend: FINAL delivery (72h)": {
+      "main": [
+        [
+          {
+            "node": "Ack: MEDIA_DELIVERED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resend: RAW delivery (12h)": {
+      "main": [
+        [
+          {
+            "node": "Ack: MEDIA_DELIVERED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ack: MEDIA_DELIVERED": {
+      "main": [
+        [
+          {
+            "node": "Wait 24h (follow-up)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 24h (follow-up)": {
+      "main": [
+        [
+          {
+            "node": "Resend: Follow-up / Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resend: Follow-up / Review": {
+      "main": [
+        [
+          {
+            "node": "Ack: FOLLOW_UP sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "name": "ssd-studio"
+    },
+    {
+      "name": "media-delivery"
+    }
+  ]
+}
