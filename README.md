@@ -1,283 +1,129 @@
 # SSD Studio — Automated Client Pipeline
 
-> **Enterprise-grade, zero-touch autonomous creative studio booking and delivery system.**  
-> A 5-minute self-serve booking flow, instant financial confirmations, cron-based logistical reminders, automated post-shoot follow-ups, and secure media delivery via dynamically generated presigned S3 URLs.
+An enterprise-grade, near-zero-touch booking and delivery system for a creative
+studio. A client books a session online, pays a deposit, and is then carried
+through a fully automated lifecycle — calendar invite, instant confirmation,
+time-staggered reminders, and secure media delivery — orchestrated by n8n and
+supervised by a self-healing monitoring daemon. The stack is designed to run
+detached, 24/7, and to be installed and operated by an external autonomous
+agent (OpenClaw) via an interactive onboarding wizard.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org)
-[![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
-[![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org)
-[![Turborepo](https://img.shields.io/badge/Monorepo-Turborepo-EF4444.svg)](https://turbo.build)
-
----
-
-## Architectural Philosophy
-
-SSD Studio's pipeline is built on a single, non-negotiable principle: **code only matters when it serves a real business outcome.** Every architectural decision traces back to a measurable client experience improvement.
-
-The system rejects the conventional approach of bolting automation onto an existing booking workflow. Instead, it is designed **automation-first**: the entire client lifecycle — from the moment a lead discovers the studio to the moment they receive their final edited package — is a fully deterministic, zero-touch sequence of events orchestrated by interconnected services. No manual intervention. No dropped emails. No missed follow-ups.
-
-Three architectural pillars underpin this philosophy:
-
-**1. Deterministic Lifecycle Execution.** The 7-stage pipeline (below) is not a set of suggestions — it is a contract. Every client who books a session will receive the exact same communications, at the exact same intervals, with mathematically guaranteed delivery windows. This is enforced through n8n's durable workflow execution with persistent state, not fire-and-forget cron jobs.
-
-**2. Defense-in-Depth for Data Integrity.** The slot reservation system employs two independent layers of conflict prevention: a Redis distributed lock (atomic NX operation, prevents concurrent reservation races at the application layer) combined with a PostgreSQL serializable transaction (prevents conflicts at the database layer). This dual-guard makes double-bookings mathematically impossible even under high concurrency.
-
-**3. Trust-Minimized Agentic Operations.** The CereFlow AI agent layer does not execute irreversible operations autonomously. Every destructive action (cancellation, refund trigger, data mutation) is gated behind a cryptographic HITL (Human-in-the-Loop) challenge-response protocol using HMAC-SHA256. The agent generates a time-bound challenge token; a human operator must provide the signed authorization before execution proceeds. This prevents prompt injection attacks from triggering irreversible business logic.
+> **Status:** This branch (`feature/autonomous-pipeline-build`) is delivered as
+> a reviewable Pull Request. Nothing has been merged to `main`. The build has
+> not been compiled/run in CI here — run the local validation steps below on
+> first checkout.
 
 ---
 
-## The 7-Stage Deterministic Lifecycle
+## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    SSD STUDIO CLIENT LIFECYCLE                              │
-├──────┬──────────────────────────────────────────────────────────────────────┤
-│ ①   │  CLIENT DISCOVERY                                                     │
-│      │  React Three Fiber 3D hero → Service Grid → Booking Wizard           │
-│      │  Target: Sub-5-minute self-serve reservation                         │
-├──────┼──────────────────────────────────────────────────────────────────────┤
-│ ②   │  SLOT RESERVATION & PAYMENT                                           │
-│      │  Redis lock + Postgres serializable TX → Stripe payment intent       │
-│      │  n8n webhook trigger on payment_intent.succeeded                     │
-├──────┼──────────────────────────────────────────────────────────────────────┤
-│ ③   │  INSTANT CONFIRMATION (t+0)                                           │
-│      │  Resend API dispatches React Email confirmation template             │
-│      │  API audit: confirmationSentAt timestamp recorded                    │
-├──────┼──────────────────────────────────────────────────────────────────────┤
-│ ④   │  48-HOUR PREPARATION GUIDE (t-48h)                                   │
-│      │  n8n Wait node → Resend preparation guide email                     │
-│      │  Includes: what to wear, location details, shot list template        │
-├──────┼──────────────────────────────────────────────────────────────────────┤
-│ ⑤   │  24-HOUR FINAL TIMELINE (t-24h)                                      │
-│      │  n8n Wait node → Resend final confirmation with exact timeline       │
-│      │  Day-of reminder at t-2h with parking/access instructions            │
-├──────┼──────────────────────────────────────────────────────────────────────┤
-│ ⑥   │  UNEDITED DELIVERY (within 12h of shoot)                             │
-│      │  S3 upload event → API webhook → presigned URL generation (12h TTL) │
-│      │  n8n media-delivery workflow dispatches download link via Resend     │
-├──────┼──────────────────────────────────────────────────────────────────────┤
-│ ⑦   │  FINAL EDITED DELIVERY + FOLLOW-UP (within 48-72h)                  │
-│      │  S3 FINAL upload event → 72h presigned URL → Resend delivery email  │
-│      │  n8n dispatches post-shoot follow-up + review request 24h later     │
-└──────┴──────────────────────────────────────────────────────────────────────┘
-```
+| Layer | Tech | Path |
+| --- | --- | --- |
+| Frontend | Next.js 16 (App Router), React 19, Tailwind, RTK Query | `apps/web` |
+| Backend API | Node.js / Express, JWT auth, Prisma | `apps/api` |
+| Database | PostgreSQL + Prisma schema | `packages/db` |
+| Orchestration | n8n workflows, Resend, Twilio/WhatsApp, Google Calendar | `apps/orchestration` |
+| Agentic layer | Python 3.11, FastMCP (SSE), monitor daemon | `apps/agents` |
+| Infrastructure | Docker Compose (detached) | `docker-compose.yml` |
+
+### Concurrency model
+There is **no Redis / application-level locking**. Double-bookings are prevented
+at the database layer via a `UNIQUE` constraint on the booking slot combined with
+`SELECT ... FOR UPDATE` transactions in Prisma.
+
+### Resilience model
+There is **no autonomous code-rewriting**. Production resilience is achieved
+through structured logging (persisted to the `SystemLog` table), retry with
+exponential backoff, circuit breakers, and an alerting webhook that notifies the
+admin over Telegram and WhatsApp when a pipeline or node fails. The `monitor`
+daemon polls n8n and the logs table, retries failed executions, and escalates.
 
 ---
 
-## Multi-Agent Cognitive Core
+## Notification lifecycle (canonical)
 
-### CereFlow — FastMCP Agentic Layer
-
-The `apps/agents` module implements **CereFlow**, a Python-based AI agent server using [FastMCP](https://github.com/jlowin/fastmcp) with SSE (Server-Sent Events) transport. CereFlow exposes a suite of `@mcp.tool()` functions that LLM clients can call to autonomously manage the booking lifecycle.
-
-**Exposed MCP Tools:**
-
-| Tool | Description |
-|------|-------------|
-| `list_bookings` | Query PostgreSQL booking records with status filter and pagination |
-| `get_booking` | Retrieve full booking details including media asset status |
-| `request_reschedule_challenge` | Generate HITL challenge token for rescheduling |
-| `reschedule_shoot` | Execute reschedule after HITL validation |
-| `request_cancellation_challenge` | Generate HITL challenge token for cancellation |
-| `execute_cancellation` | Execute cancellation after HITL validation |
-| `get_booking_analytics` | Retrieve revenue and conversion analytics |
-
-### HITL Cryptographic Safeguards
-
-All irreversible operations are protected by a two-step HMAC-SHA256 challenge-response protocol:
-
-```
-Agent                          Human Operator                    System
-  │                                 │                              │
-  │── request_*_challenge ─────────►│                              │
-  │◄─ { challenge_token } ──────────│                              │
-  │                                 │                              │
-  │   [Human verifies intent]       │                              │
-  │                                 │                              │
-  │── execute_* (challenge_token) ──┼──────────────────────────────►│
-  │                                 │   [HMAC validated + executed] │
-  │◄──────────────────────────────── { success: true } ────────────│
-```
-
-Challenge tokens are:
-- **Time-bound**: expire after `HITL_TOKEN_EXPIRY_SECONDS` (default: 300s)
-- **Operation-scoped**: tied to a specific operation type and entity ID
-- **Replay-resistant**: each token is unique and single-use
-- **Constant-time verified**: `hmac.compare_digest` prevents timing attacks
+1. **Booking finalized** (Stripe deposit confirmed) -> create Google Calendar
+   event + `.ics` -> instant confirmation email with a "Next Steps" section.
+2. **T-24h** -> SMS if a mobile number is on file, otherwise email.
+3. **Day-of** -> reminder email.
+4. **T-1h** -> **SMS only** (strict: never email at the one-hour mark).
+5. **Media delivery** -> RAW assets get a 12h link and stop there; FINAL assets
+   get a 72h link and, **24h after the FINAL package only**, a single
+   review-request email.
 
 ---
 
-## Technical Stack Matrix
-
-| Layer | Technology | Version | Purpose |
-|-------|-----------|---------|---------|
-| **Monorepo** | Turborepo | 2.x | Parallel builds, shared packages, task pipelines |
-| **Frontend** | Next.js | 16 | App Router, RSC, streaming, metadata API |
-| **UI Runtime** | React | 19 | Concurrent features, server components |
-| **Styling** | Tailwind CSS | 3.4 | Utility-first, responsive design system |
-| **3D Rendering** | React Three Fiber + Drei | 8.x / 9.x | Immersive WebGL hero section |
-| **State Management** | RTK Query | 2.x | Real-time slot availability, cache invalidation |
-| **Backend** | Node.js / Express | 20+ / 4.x | RESTful API, webhook listeners |
-| **ORM** | Prisma | 5.x | Type-safe PostgreSQL client, migrations |
-| **Database** | PostgreSQL | 16 | Primary relational store |
-| **Distributed Lock** | Redis (ioredis) | 7 | Atomic slot locking, session cache |
-| **Orchestration** | n8n | Latest | Visual workflow automation, durable execution |
-| **Email** | Resend API | Latest | Transactional email with React templates |
-| **Storage** | Amazon S3 SDK | 3.x | Media asset storage, presigned URL generation |
-| **Payments** | Stripe | 2024-04-10 | Payment processing, webhook verification |
-| **Agent Runtime** | Python | 3.11+ | CereFlow MCP server |
-| **MCP Framework** | FastMCP | 2.x | SSE transport, tool registration |
-| **Agent DB Driver** | asyncpg | 0.29+ | Async PostgreSQL for agent queries |
-| **WebRTC** | LiveKit | 0.11+ | Real-time agent communication |
-| **Containerization** | Docker Compose | 3.9 | Local dev orchestration |
-| **Auth** | JWT (jsonwebtoken) | 9.x | Stateless token-based auth |
-
----
-
-## Monorepo Structure
+## Repository layout
 
 ```
-ssd-studio-automated-client-pipeline/
-├── apps/
-│   ├── web/                         # Next.js 16 frontend
-│   │   └── src/
-│   │       ├── app/                 # App Router pages & layouts
-│   │       ├── components/          # React components (booking wizard, 3D canvas)
-│   │       └── store/               # RTK Query API slices
-│   ├── api/                         # Node.js / Express backend
-│   │   └── src/
-│   │       ├── index.ts             # Server entry point
-│   │       ├── middleware/          # JWT auth, error handling, rate limiting
-│   │       └── routes/              # bookings, auth, webhooks, media
-│   ├── orchestration/               # n8n workflow JSON schemas
-│   │   └── workflows/
-│   │       ├── booking-lifecycle.json   # Confirmation + reminder chain
-│   │       └── media-delivery.json      # S3 → presigned URL → email chain
-│   └── agents/                      # Python FastMCP agent server
-│       ├── server.py                # CereFlow MCP tools + HITL safeguards
-│       ├── requirements.txt         # Python dependencies
-│       └── Dockerfile               # Container definition
-├── packages/
-│   ├── db/                          # Shared Prisma schema
-│   │   └── prisma/
-│   │       └── schema.prisma        # User, Booking, MediaAsset, AuditLog models
-│   └── ui/                          # Shared Shadcn component library
-├── docker-compose.yml               # Postgres + n8n + FastMCP orchestration
-├── .env.example                     # Environment variable template
-├── turbo.json                       # Turborepo pipeline configuration
-├── package.json                     # Root workspace configuration
-└── README.md
+apps/
+  web/            Next.js 16 booking frontend (RTK Query, Tailwind)
+  api/            Express API (auth, bookings, Stripe/n8n/S3 webhooks)
+  orchestration/  n8n workflow JSON (booking-lifecycle, media-delivery)
+  agents/         FastMCP server + self-healing monitor daemon (Python)
+packages/
+  db/             Prisma schema (User, Booking, MediaAsset, SystemLog)
+docker-compose.yml
+.env.example
+OPENCLAW_ONBOARDING.md
 ```
 
 ---
 
-## Deployment & Installation Protocol
-
-### Prerequisites
-
-- Node.js ≥ 20.0.0
-- Python ≥ 3.11
-- Docker & Docker Compose
-- npm ≥ 10.0.0
-
-### Step 1 — Clone the Repository
+## Quick start (local)
 
 ```bash
-git clone https://github.com/shiva1837/ssd-studio-automated-client-pipeline.git
-cd ssd-studio-automated-client-pipeline
-```
-
-### Step 2 — Install Node.js Dependencies
-
-```bash
-npm install
-```
-
-This installs all workspace dependencies across `apps/web`, `apps/api`, `packages/db`, and `packages/ui`.
-
-### Step 3 — Configure Environment Variables
-
-```bash
+# 1. Configure environment
 cp .env.example .env
+#    -> edit .env and inject your own secrets
+
+# 2. Bring up the full stack, detached
+docker compose up -d --build
+
+# 3. Apply the database schema (first run)
+#    The API container runs `prisma migrate deploy` on boot. To create the
+#    initial migration during development:
+docker compose exec api npx prisma migrate dev --schema=/repo/packages/db/prisma/schema.prisma
+
+# 4. Open the apps
+#    Web:   http://localhost:3000
+#    API:   http://localhost:4000/health
+#    n8n:   http://localhost:5678
+#    Agent: http://localhost:8080/health
 ```
 
-Open `.env` and fill in all required values:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DATABASE_URL` | ✅ | PostgreSQL connection string |
-| `JWT_SECRET` | ✅ | Min 32-char random string |
-| `RESEND_API_KEY` | ✅ | From [resend.com](https://resend.com) |
-| `AWS_ACCESS_KEY_ID` | ✅ | IAM user with S3 read/write |
-| `AWS_SECRET_ACCESS_KEY` | ✅ | Corresponding secret |
-| `STRIPE_SECRET_KEY` | ✅ | From Stripe dashboard |
-| `HITL_HMAC_SECRET` | ✅ | Min 32-char secret for HITL |
-| `N8N_ENCRYPTION_KEY` | ✅ | Min 32-char n8n encryption key |
-
-### Step 4 — Launch Infrastructure (Docker)
-
-```bash
-docker-compose up -d
-```
-
-This starts:
-- **PostgreSQL** on port 5432
-- **Redis** on port 6379
-- **n8n** on port 5678 (UI: http://localhost:5678)
-- **FastMCP Agent** on port 8080
-
-### Step 5 — Push Database Schema
-
-```bash
-npx prisma db push --schema=packages/db/prisma/schema.prisma
-```
-
-Or use the workspace script:
-
-```bash
-npm run db:push
-```
-
-### Step 6 — Generate Prisma Client
-
-```bash
-npm run db:generate
-```
-
-### Step 7 — Start Development Servers
-
-```bash
-npm run dev
-```
-
-Turborepo starts all apps in parallel:
-- **Frontend**: http://localhost:3000
-- **API**: http://localhost:4000
-- **Health check**: http://localhost:4000/health
-
-### Step 8 — Import n8n Workflows
-
-1. Navigate to http://localhost:5678
-2. Log in with `N8N_BASIC_AUTH_USER` / `N8N_BASIC_AUTH_PASSWORD`
-3. Go to **Workflows → Import**
-4. Import `apps/orchestration/workflows/booking-lifecycle.json`
-5. Import `apps/orchestration/workflows/media-delivery.json`
-6. Configure credentials (Resend API key, internal API URL)
-7. Activate both workflows
+Import the workflow JSON in `apps/orchestration/workflows` into n8n (they are
+mounted into the container), attach your credentials, and activate them.
 
 ---
 
-## Environment Security Notes
+## Validation checklist (run on first checkout)
 
-- **Never commit `.env`** — it is gitignored by default
-- Rotate `JWT_SECRET` and `HITL_HMAC_SECRET` regularly in production
-- Use AWS IAM roles with least-privilege S3 access
-- Set `N8N_BASIC_AUTH_ACTIVE=true` in all environments
-- The `MCP_SECRET_KEY` validates internal webhook calls from API → n8n → agents
+Because this environment cannot execute builds, please verify locally:
+
+- [ ] `npm install` at the repo root resolves the workspaces.
+- [ ] `npm run build` in `apps/api` (`tsc`) compiles with no errors.
+- [ ] `npm run build` in `apps/web` (`next build`) succeeds.
+- [ ] `npx prisma validate` against `packages/db/prisma/schema.prisma` passes.
+- [ ] `docker compose config` parses the compose file with no errors.
+- [ ] Python deps in `apps/agents/requirements.txt` install cleanly.
 
 ---
 
-## License
+## Agent-operated setup
 
-MIT © SSD Studio
+For the autonomous onboarding flow (prerequisite checks, channel integration
+prompts with skip logic, brand styling, interactive testing, and graceful
+handling of skipped integrations), see **[OPENCLAW_ONBOARDING.md](./OPENCLAW_ONBOARDING.md)**.
+
+---
+
+## Security notes
+
+- No real secrets are committed. `.env.example` is a template only.
+- Stripe webhooks are verified with `express.raw()` signature checking; the
+  n8n/S3 internal webhooks use a shared `WEBHOOK_INTERNAL_SECRET` header.
+- Human-in-the-loop agent tools (reschedule / cancellation) are gated by an
+  HMAC-SHA256 signature (`HITL_HMAC_SECRET`).
+- The legal pages (`/terms`, `/privacy`) ship with **placeholder boilerplate**.
+  The business owner must replace them with their own legally binding text.
