@@ -6,7 +6,7 @@
     "saveExecutionProgress": true
   },
   "meta": {
-    "description": "Triggered by 'media-ready' (S3 object created -> API generated a presigned URL). Emails the time-limited download link via Resend. RAW assets use a 12h link; FINAL assets use a 72h link and schedule a follow-up/review request 24h later."
+    "description": "Triggered by 'media-ready' (S3 object created -> API generated a presigned URL). Emails the time-limited download link via Resend. RAW assets use a 12h link and terminate after delivery (no review solicitation). FINAL assets use a 72h link and schedule a follow-up/review request 24h after the FINAL package is delivered."
   },
   "nodes": [
     {
@@ -147,10 +147,10 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={ \"bookingId\": \"{{ $json.booking.id }}\", \"stage\": \"MEDIA_DELIVERED\" }"
+        "jsonBody": "={ \"bookingId\": \"{{ $json.booking.id }}\", \"stage\": \"FINAL_DELIVERED\" }"
       },
-      "id": "node-ack-delivered",
-      "name": "Ack: MEDIA_DELIVERED",
+      "id": "node-ack-final-delivered",
+      "name": "Ack: FINAL_DELIVERED",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.1,
       "position": [
@@ -160,12 +160,38 @@
     },
     {
       "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/api/webhooks/n8n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-secret",
+              "value": "={{ $env.WEBHOOK_INTERNAL_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"bookingId\": \"{{ $json.booking.id }}\", \"stage\": \"RAW_DELIVERED\" }"
+      },
+      "id": "node-ack-raw-delivered",
+      "name": "Ack: RAW_DELIVERED (terminal)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1160,
+        520
+      ]
+    },
+    {
+      "parameters": {
         "resume": "timeInterval",
         "unit": "hours",
         "amount": 24
       },
       "id": "node-wait-followup",
-      "name": "Wait 24h (follow-up)",
+      "name": "Wait 24h (post-FINAL)",
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
@@ -189,10 +215,10 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"from\": \"{{ $env.RESEND_FROM_EMAIL }}\",\n  \"to\": [\"{{ $json.booking.client.email }}\"],\n  \"subject\": \"How did we do? Leave a quick review\",\n  \"html\": \"<p>Hi {{ $json.booking.client.name }}, we hope you love your photos! We'd be grateful for a quick review: <a href='{{ $env.REVIEW_URL }}'>Leave a review</a>.</p>\"\n}"
+        "jsonBody": "={\n  \"from\": \"{{ $env.RESEND_FROM_EMAIL }}\",\n  \"to\": [\"{{ $json.booking.client.email }}\"],\n  \"subject\": \"How did we do? Leave a quick review\",\n  \"html\": \"<p>Hi {{ $json.booking.client.name }}, we hope you love your final photos! We'd be grateful for a quick review: <a href='{{ $env.REVIEW_URL }}'>Leave a review</a>.</p>\"\n}"
       },
       "id": "node-email-followup",
-      "name": "Resend: Follow-up / Review",
+      "name": "Resend: Follow-up / Review (FINAL only)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.1,
       "position": [
@@ -272,7 +298,7 @@
       "main": [
         [
           {
-            "node": "Ack: MEDIA_DELIVERED",
+            "node": "Ack: FINAL_DELIVERED",
             "type": "main",
             "index": 0
           }
@@ -283,36 +309,36 @@
       "main": [
         [
           {
-            "node": "Ack: MEDIA_DELIVERED",
+            "node": "Ack: RAW_DELIVERED (terminal)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Ack: MEDIA_DELIVERED": {
+    "Ack: FINAL_DELIVERED": {
       "main": [
         [
           {
-            "node": "Wait 24h (follow-up)",
+            "node": "Wait 24h (post-FINAL)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Wait 24h (follow-up)": {
+    "Wait 24h (post-FINAL)": {
       "main": [
         [
           {
-            "node": "Resend: Follow-up / Review",
+            "node": "Resend: Follow-up / Review (FINAL only)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Resend: Follow-up / Review": {
+    "Resend: Follow-up / Review (FINAL only)": {
       "main": [
         [
           {
