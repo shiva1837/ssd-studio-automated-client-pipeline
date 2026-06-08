@@ -1,0 +1,593 @@
+{
+  "name": "SSD Studio — Booking Lifecycle",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "meta": {
+    "description": "Triggered on booking finalization. Creates a Google Calendar event + .ics link, sends instant confirmation, then runs the timed reminder sequence: T-24h (SMS if phone present else email), Day-Of (email), and T-1h (SMS only)."
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "booking-created",
+        "responseMode": "onReceived",
+        "options": {
+          "responseData": "allEntries"
+        }
+      },
+      "id": "node-webhook-trigger",
+      "name": "Webhook: booking-created",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        400
+      ],
+      "webhookId": "booking-created"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.API_BASE_URL }}/api/internal/bookings/{{ $json.body.bookingId }}",
+        "options": {
+          "timeout": 10000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-secret",
+              "value": "={{ $env.WEBHOOK_INTERNAL_SECRET }}"
+            }
+          ]
+        }
+      },
+      "id": "node-fetch-booking",
+      "name": "Fetch Booking Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        460,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "event",
+        "operation": "create",
+        "calendar": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_ADMIN_CALENDAR_ID }}",
+          "mode": "id"
+        },
+        "start": "={{ $json.startTime }}",
+        "end": "={{ $json.endTime }}",
+        "additionalFields": {
+          "summary": "={{ $json.serviceType }} — {{ $json.client.name }}",
+          "description": "SSD Studio booking {{ $json.id }} for {{ $json.client.email }}",
+          "attendees": [
+            "={{ $json.client.email }}"
+          ]
+        }
+      },
+      "id": "node-gcal-create",
+      "name": "Google Calendar: Create Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1,
+      "position": [
+        680,
+        400
+      ],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "GCAL_CRED",
+          "name": "Google Calendar account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build a client-facing Google Calendar 'add event' link and an .ics URL.\nconst b = $('Fetch Booking Details').item.json;\nconst fmt = (iso) => new Date(iso).toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';\nconst start = fmt(b.startTime);\nconst end = fmt(b.endTime);\nconst title = encodeURIComponent(`${b.serviceType} — SSD Studio`);\nconst gcalLink = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&dates=${start}/${end}`;\nconst icsUrl = `${$env.API_BASE_URL}/api/bookings/${b.id}/calendar.ics`;\nreturn [{ json: { ...b, gcalLink, icsUrl, calendarEventId: $('Google Calendar: Create Event').item.json.id } }];"
+      },
+      "id": "node-build-ics",
+      "name": "Build Calendar Links",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.RESEND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"from\": \"{{ $env.RESEND_FROM_EMAIL }}\",\n  \"to\": [\"{{ $json.client.email }}\"],\n  \"subject\": \"Your SSD Studio booking is confirmed\",\n  \"html\": \"<h2>You're booked!</h2><p>Hi {{ $json.client.name }}, your {{ $json.serviceType }} is confirmed for {{ $json.startTime }}.</p><p><a href='{{ $json.gcalLink }}'>Add to Google Calendar</a> &middot; <a href='{{ $json.icsUrl }}'>Download .ics</a></p><h3>Next steps to prepare</h3><ul><li>Confirm your shot list and any wardrobe.</li><li>Arrive 10 minutes early; parking details to follow.</li><li>Reply to this email with any questions.</li></ul>\"\n}",
+        "options": {}
+      },
+      "id": "node-email-confirm",
+      "name": "Resend: Instant Confirmation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1120,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/api/webhooks/n8n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-secret",
+              "value": "={{ $env.WEBHOOK_INTERNAL_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"bookingId\": \"{{ $json.id }}\", \"stage\": \"CONFIRMATION\" }"
+      },
+      "id": "node-ack-confirm",
+      "name": "Ack: CONFIRMATION sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1340,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "unit": "minutes",
+        "amount": "={{ Math.max(0, Math.floor((new Date($json.startTime).getTime() - Date.now() - 24*60*60*1000) / 60000)) }}"
+      },
+      "id": "node-wait-24h",
+      "name": "Wait until T-24h",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1340,
+        620
+      ],
+      "webhookId": "wait-24h"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.client.phone }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ]
+        }
+      },
+      "id": "node-if-phone",
+      "name": "IF phone present?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        620
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "specifyBody": "string",
+        "body": "From={{ $env.TWILIO_SMS_FROM }}&To={{ $json.client.phone }}&Body=Reminder: your SSD Studio {{ $json.serviceType }} is in 24 hours ({{ $json.startTime }}). Reply STOP to opt out.",
+        "options": {}
+      },
+      "id": "node-sms-24h",
+      "name": "Twilio SMS (T-24h)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1800,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.RESEND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"from\": \"{{ $env.RESEND_FROM_EMAIL }}\",\n  \"to\": [\"{{ $json.client.email }}\"],\n  \"subject\": \"Reminder: your shoot is in 24 hours\",\n  \"html\": \"<p>Hi {{ $json.client.name }}, this is a reminder that your {{ $json.serviceType }} is in 24 hours at {{ $json.startTime }}.</p>\"\n}"
+      },
+      "id": "node-email-24h",
+      "name": "Resend Email (T-24h fallback)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1800,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/api/webhooks/n8n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-secret",
+              "value": "={{ $env.WEBHOOK_INTERNAL_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"bookingId\": \"{{ $json.id }}\", \"stage\": \"REMINDER_24H\" }"
+      },
+      "id": "node-ack-24h",
+      "name": "Ack: REMINDER_24H sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        2040,
+        620
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "unit": "minutes",
+        "amount": "={{ Math.max(0, Math.floor((new Date(new Date($json.startTime).setHours(8,0,0,0)).getTime() - Date.now()) / 60000)) }}"
+      },
+      "id": "node-wait-dayof",
+      "name": "Wait until Day-Of 08:00",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2040,
+        840
+      ],
+      "webhookId": "wait-dayof"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.RESEND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"from\": \"{{ $env.RESEND_FROM_EMAIL }}\",\n  \"to\": [\"{{ $json.client.email }}\"],\n  \"subject\": \"Today's the day — your SSD Studio shoot\",\n  \"html\": \"<p>Good morning {{ $json.client.name }}! Your {{ $json.serviceType }} is today at {{ $json.startTime }}. Parking and access details: see your confirmation. See you soon!</p>\"\n}"
+      },
+      "id": "node-email-dayof",
+      "name": "Resend Email (Day-Of)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        2260,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/api/webhooks/n8n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-secret",
+              "value": "={{ $env.WEBHOOK_INTERNAL_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"bookingId\": \"{{ $json.id }}\", \"stage\": \"DAY_OF\" }"
+      },
+      "id": "node-ack-dayof",
+      "name": "Ack: DAY_OF sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        2480,
+        840
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "unit": "minutes",
+        "amount": "={{ Math.max(0, Math.floor((new Date($json.startTime).getTime() - Date.now() - 60*60*1000) / 60000)) }}"
+      },
+      "id": "node-wait-1h",
+      "name": "Wait until T-1h",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2480,
+        1060
+      ],
+      "webhookId": "wait-1h"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "specifyBody": "string",
+        "body": "From={{ $env.TWILIO_SMS_FROM }}&To={{ $json.client.phone }}&Body=Your SSD Studio {{ $json.serviceType }} starts in 1 hour. See you soon!",
+        "options": {}
+      },
+      "id": "node-sms-1h",
+      "name": "Twilio SMS ONLY (T-1h)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        2700,
+        1060
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.API_BASE_URL }}/api/webhooks/n8n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-secret",
+              "value": "={{ $env.WEBHOOK_INTERNAL_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"bookingId\": \"{{ $json.id }}\", \"stage\": \"REMINDER_1H\" }"
+      },
+      "id": "node-ack-1h",
+      "name": "Ack: REMINDER_1H sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        2920,
+        1060
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: booking-created": {
+      "main": [
+        [
+          {
+            "node": "Fetch Booking Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Booking Details": {
+      "main": [
+        [
+          {
+            "node": "Google Calendar: Create Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Calendar: Create Event": {
+      "main": [
+        [
+          {
+            "node": "Build Calendar Links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Calendar Links": {
+      "main": [
+        [
+          {
+            "node": "Resend: Instant Confirmation",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Wait until T-24h",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resend: Instant Confirmation": {
+      "main": [
+        [
+          {
+            "node": "Ack: CONFIRMATION sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait until T-24h": {
+      "main": [
+        [
+          {
+            "node": "IF phone present?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF phone present?": {
+      "main": [
+        [
+          {
+            "node": "Twilio SMS (T-24h)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Resend Email (T-24h fallback)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Twilio SMS (T-24h)": {
+      "main": [
+        [
+          {
+            "node": "Ack: REMINDER_24H sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resend Email (T-24h fallback)": {
+      "main": [
+        [
+          {
+            "node": "Ack: REMINDER_24H sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ack: REMINDER_24H sent": {
+      "main": [
+        [
+          {
+            "node": "Wait until Day-Of 08:00",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait until Day-Of 08:00": {
+      "main": [
+        [
+          {
+            "node": "Resend Email (Day-Of)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resend Email (Day-Of)": {
+      "main": [
+        [
+          {
+            "node": "Ack: DAY_OF sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ack: DAY_OF sent": {
+      "main": [
+        [
+          {
+            "node": "Wait until T-1h",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait until T-1h": {
+      "main": [
+        [
+          {
+            "node": "Twilio SMS ONLY (T-1h)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Twilio SMS ONLY (T-1h)": {
+      "main": [
+        [
+          {
+            "node": "Ack: REMINDER_1H sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "name": "ssd-studio"
+    },
+    {
+      "name": "lifecycle"
+    }
+  ]
+}
