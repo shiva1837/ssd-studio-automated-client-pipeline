@@ -44,17 +44,25 @@ enum ServiceType {
   VIDEO_PRODUCTION
 }
 
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
 // ============================================================
 // USER MODEL
 // ============================================================
 
 model User {
-  id        String   @id @default(uuid()) @db.Uuid
-  email     String   @unique
-  name      String
-  phone     String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  name         String
+  phone        String
+  passwordHash String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   // Relations
   bookings Booking[]
@@ -76,31 +84,40 @@ model Booking {
   status      BookingStatus @default(PENDING)
   amountPaid  Float         @default(0)
 
-  // Confirmation & Communication
+  // Confirmation & Communication lifecycle timestamps
   confirmationSentAt  DateTime?
   reminderSent48hAt   DateTime?
   reminderSent24hAt   DateTime?
   reminderSentDayOfAt DateTime?
+  reminderSent1hAt    DateTime?
   followUpSentAt      DateTime?
 
+  // Calendar integration
+  calendarEventId String?
+  icsUrl          String?
+
   // Metadata
-  notes          String?
-  internalNotes  String?
+  notes           String?
+  internalNotes   String?
   stripePaymentId String?
-  lockToken       String?   @unique
-  lockExpiresAt   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   // Relations
-  client     User         @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  client      User         @relation(fields: [clientId], references: [id], onDelete: Cascade)
   mediaAssets MediaAsset[]
 
+  // NOTE on double-booking prevention:
+  // The application enforces no overlapping ACTIVE bookings via a
+  // SERIALIZABLE transaction (see apps/api/src/routes/bookings.ts).
+  // A partial unique index limited to PENDING/CONFIRMED rows is the
+  // recommended DB backstop and can be added via a raw SQL migration
+  // (Prisma cannot yet express partial unique indexes declaratively).
   @@index([clientId])
   @@index([startTime])
   @@index([status])
-  @@index([lockToken])
+  @@index([startTime, endTime])
   @@map("bookings")
 }
 
@@ -117,7 +134,7 @@ model MediaAsset {
   expiresAt      DateTime?
 
   // S3 Presigned URL cache
-  presignedUrl      String?
+  presignedUrl       String?
   presignedUrlExpiry DateTime?
 
   // Delivery tracking
@@ -125,9 +142,9 @@ model MediaAsset {
   deliveryEmailSent Boolean   @default(false)
 
   // File metadata
-  fileName   String?
+  fileName      String?
   fileSizeBytes BigInt?
-  mimeType   String?
+  mimeType      String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -157,4 +174,27 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([createdAt])
   @@map("audit_logs")
+}
+
+// ============================================================
+// SYSTEM LOG MODEL — Resilience & error tracking
+// Written by the API error handler, the n8n dispatcher, and the
+// Python self-healing monitor for centralized observability.
+// ============================================================
+
+model SystemLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  level      LogLevel @default(INFO)
+  source     String   // e.g. 'api', 'n8n-dispatch', 'auto-heal-monitor'
+  message    String
+  context    Json?
+  resolved   Boolean  @default(false)
+  resolvedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([level])
+  @@index([source])
+  @@index([resolved])
+  @@index([createdAt])
+  @@map("system_logs")
 }
