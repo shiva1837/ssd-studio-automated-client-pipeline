@@ -75,19 +75,6 @@ const authLimiter = rateLimit({
   message: { error: 'Too many authentication attempts, please try again later.' },
 });
 
-app.use('/api/auth', authLimiter);
-// Exempt webhooks from global rate limiter (Stripe retries aggressively)
-app.use('/api/webhooks', (req, res, next) => next());
-app.use('/api', globalLimiter);
-
-// ============================================================
-// REQUEST PARSING
-// ============================================================
-// Note: webhooks need raw body for Stripe signature verification
-app.use('/api/webhooks', express.raw({ type: 'application/json' }));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
 // ============================================================
 // LOGGING
 // ============================================================
@@ -96,6 +83,26 @@ app.use(morgan('combined', {
     write: (message: string) => logger.http(message.trim()),
   },
 }));
+
+// ============================================================
+// WEBHOOKS — mounted BEFORE the global rate limiter
+// ============================================================
+// Stripe retries aggressively; rate-limiting its callbacks drops payment
+// events. The raw body parser is scoped here because signature verification
+// needs the unparsed payload (express.json would consume it).
+app.use('/api/webhooks', express.raw({ type: 'application/json' }), webhooksRouter);
+
+// ============================================================
+// RATE LIMITING (webhooks above are exempt)
+// ============================================================
+app.use('/api/auth', authLimiter);
+app.use('/api', globalLimiter);
+
+// ============================================================
+// REQUEST PARSING
+// ============================================================
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ============================================================
 // HEALTH CHECK
@@ -124,7 +131,6 @@ app.get('/health', async (_req: Request, res: Response) => {
 // ============================================================
 app.use('/api/auth', authRouter);
 app.use('/api/bookings', bookingsRouter);
-app.use('/api/webhooks', webhooksRouter);
 app.use('/api/media', mediaRouter);
 app.use('/api/analytics', analyticsRouter);
 

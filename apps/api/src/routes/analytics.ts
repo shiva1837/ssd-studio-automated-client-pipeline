@@ -48,18 +48,16 @@ analyticsRouter.get('/', requireAuth, asyncHandler(async (_req: AuthenticatedReq
     }),
   ]);
 
+  // All monetary values are in cents, matching the amountPaid Int column
   res.json({
     totalBookings,
     byStatus: Object.fromEntries(byStatus.map((s) => [s.status, s._count.status])),
-    revenue: {
-      total: (revenue._sum.amountPaid || 0) / 100,
-      average: (revenue._avg.amountPaid || 0) / 100,
-      paidBookings: revenue._count.amountPaid,
-    },
+    totalRevenue: revenue._sum.amountPaid ?? 0,
+    avgBookingValue: Math.round(revenue._avg.amountPaid ?? 0),
     byService: byService.map((s) => ({
       serviceType: s.serviceType,
       count: s._count.serviceType,
-      revenue: (s._sum.amountPaid || 0) / 100,
+      revenue: s._sum.amountPaid ?? 0,
     })),
     upcomingBookings,
   });
