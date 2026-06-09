@@ -13,6 +13,7 @@ import { redis } from '../lib/redis';
 import { logger } from '../lib/logger';
 import { requireAuth, AuthenticatedRequest } from '../middleware/auth';
 import { BookingStatus } from '@prisma/client';
+import type { Prisma } from '@prisma/client';
 
 export const bookingsRouter = Router();
 
@@ -190,7 +191,7 @@ bookingsRouter.post('/', requireAuth, asyncHandler(async (req: AuthenticatedRequ
     // ── Phase 2: PostgreSQL serializable transaction ─────────
     // This second layer guarantees atomicity at the DB level,
     // handling any edge case where Redis and Postgres diverge.
-    const booking = await prisma.$transaction(async (tx) => {
+    const booking = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       // Re-check for conflicts inside the transaction (serializable isolation)
       const existingConflict = await tx.booking.findFirst({
         where: {
