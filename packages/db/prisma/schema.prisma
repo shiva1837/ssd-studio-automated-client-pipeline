@@ -75,7 +75,7 @@ model Booking {
   startTime   DateTime
   endTime     DateTime
   status      BookingStatus @default(PENDING)
-  amountPaid  Float         @default(0)
+  amountPaid  Int           @default(0) // amount in cents to avoid floating point errors
 
   // Confirmation & Communication
   confirmationSentAt  DateTime?

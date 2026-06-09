@@ -11,9 +11,10 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { redis } from '../lib/redis';
 import { logger } from '../lib/logger';
+import { writeAuditLog } from '../lib/audit';
+import { sendBookingCreatedEmail, sendBookingStatusEmail } from '../lib/email';
 import { requireAuth, AuthenticatedRequest } from '../middleware/auth';
-import { BookingStatus } from '@prisma/client';
-import type { Prisma } from '@prisma/client';
+import { BookingStatus, Prisma } from '@prisma/client';
 
 export const bookingsRouter = Router();
 
@@ -28,10 +29,14 @@ const CreateBookingSchema = z.object({
   notes: z.string().max(1000).optional(),
 });
 
-const UpdateBookingSchema = z.object({
-  status: z.nativeEnum(BookingStatus).optional(),
-  notes: z.string().max(1000).optional(),
-});
+// Clients may only update notes. Status transitions (CONFIRMED, COMPLETED)
+// happen exclusively through the Stripe webhook; .strict() rejects any
+// attempt to send status or other fields.
+const UpdateBookingSchema = z
+  .object({
+    notes: z.string().max(1000).optional(),
+  })
+  .strict();
 
 // ============================================================
 // DISTRIBUTED LOCK UTILITIES
@@ -39,40 +44,121 @@ const UpdateBookingSchema = z.object({
 
 const LOCK_TTL_MS = Number(process.env.BOOKING_LOCK_TTL_SECONDS || 300) * 1000;
 const LOCK_PREFIX = 'booking:slot:lock:';
+const SLOT_BUCKET_MS = Number(process.env.BOOKING_SLOT_DURATION_MINUTES || 60) * 60 * 1000;
 
 /**
- * Acquires a Redis-based distributed slot lock.
- * Returns the lock token if acquired, null if slot is already contested.
+ * Discretizes a time range into fixed slot buckets so overlapping ranges
+ * always contend on at least one shared lock key. A 10:00-11:00 booking and
+ * a 10:30-11:30 booking both cover the 10:00 bucket and cannot proceed
+ * concurrently, which the previous exact startTime:endTime key allowed.
+ */
+function getSlotBucketKeys(startTime: Date, endTime: Date): string[] {
+  const keys: string[] = [];
+  let bucket = Math.floor(startTime.getTime() / SLOT_BUCKET_MS) * SLOT_BUCKET_MS;
+  for (; bucket < endTime.getTime(); bucket += SLOT_BUCKET_MS) {
+    keys.push(`${LOCK_PREFIX}${new Date(bucket).toISOString()}`);
+  }
+  return keys;
+}
+
+const RELEASE_LOCK_LUA = `
+  if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+  else
+    return 0
+  end
+`;
+
+/**
+ * Acquires Redis locks on every slot bucket the range covers.
+ * Returns the lock token if all buckets were acquired, null if any bucket
+ * is contested (already-acquired buckets are rolled back).
  * This is the FIRST defensive layer against double-bookings.
  */
 async function acquireSlotLock(startTime: Date, endTime: Date): Promise<string | null> {
-  const slotKey = `${LOCK_PREFIX}${startTime.toISOString()}:${endTime.toISOString()}`;
+  const bucketKeys = getSlotBucketKeys(startTime, endTime);
   const lockToken = uuidv4();
   const lockExpiry = Math.ceil(LOCK_TTL_MS / 1000);
 
-  // NX = only set if Not eXists. This is atomic in Redis.
-  const result = await redis.set(slotKey, lockToken, 'EX', lockExpiry, 'NX');
-
-  if (result === 'OK') {
-    logger.info(`Slot lock acquired: ${slotKey} with token ${lockToken}`);
-    return lockToken;
+  const acquired: string[] = [];
+  for (const key of bucketKeys) {
+    // NX = only set if Not eXists. This is atomic in Redis.
+    const result = await redis.set(key, lockToken, 'EX', lockExpiry, 'NX');
+    if (result === 'OK') {
+      acquired.push(key);
+    } else {
+      logger.warn(`Slot lock contested: ${key}`);
+      await Promise.all(acquired.map((k) => redis.eval(RELEASE_LOCK_LUA, 1, k, lockToken)));
+      return null;
+    }
   }
 
-  logger.warn(`Slot lock contested: ${slotKey}`);
-  return null;
+  logger.info(`Slot lock acquired: [${bucketKeys.join(', ')}] with token ${lockToken}`);
+  return lockToken;
 }
 
 async function releaseSlotLock(startTime: Date, endTime: Date, lockToken: string): Promise<void> {
-  const slotKey = `${LOCK_PREFIX}${startTime.toISOString()}:${endTime.toISOString()}`;
-  // Only release if we own the lock (compare-and-delete via Lua)
-  const luaScript = `
-    if redis.call("get", KEYS[1]) == ARGV[1] then
-      return redis.call("del", KEYS[1])
-    else
-      return 0
-    end
-  `;
-  await redis.eval(luaScript, 1, slotKey, lockToken);
+  const bucketKeys = getSlotBucketKeys(startTime, endTime);
+  // Only release buckets we own (compare-and-delete via Lua)
+  await Promise.all(
+    bucketKeys.map((key) => redis.eval(RELEASE_LOCK_LUA, 1, key, lockToken))
+  );
+}
+
+// ============================================================
+// SERIALIZABLE TRANSACTION RETRY
+// ============================================================
+
+const MAX_TX_ATTEMPTS = 3;
+
+/**
+ * Runs a serializable transaction, retrying on Prisma P2034 (serialization
+ * failure / deadlock) with exponential backoff and jitter. Serializable
+ * isolation aborts one of two concurrent conflicting transactions by design;
+ * a retry is the correct response, not an error.
+ */
+async function runSerializableTransaction<T>(
+  fn: (tx: Prisma.TransactionClient) => Promise<T>
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await prisma.$transaction(fn, { isolationLevel: 'Serializable' });
+    } catch (error) {
+      const isSerializationFailure =
+        error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034';
+      if (!isSerializationFailure || attempt >= MAX_TX_ATTEMPTS) {
+        throw error;
+      }
+      const backoffMs = 50 * 2 ** attempt + Math.floor(Math.random() * 100);
+      logger.warn(
+        `Serialization failure (P2034), retrying transaction in ${backoffMs}ms (attempt ${attempt}/${MAX_TX_ATTEMPTS})`
+      );
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    }
+  }
+}
+
+// ============================================================
+// N8N WEBHOOK NOTIFICATION
+// ============================================================
+
+function notifyN8n(path: string, payload: Record<string, unknown>): void {
+  setImmediate(async () => {
+    try {
+      const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL;
+      if (!n8nWebhookUrl) return;
+      await fetch(`${n8nWebhookUrl}/${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Secret': process.env.N8N_INTERNAL_SECRET || '',
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      logger.warn(`Failed to notify n8n (${path}):`, err);
+    }
+  });
 }
 
 // ============================================================
@@ -80,8 +166,9 @@ async function releaseSlotLock(startTime: Date, endTime: Date, lockToken: string
 // ============================================================
 bookingsRouter.get('/', requireAuth, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const { status, page = '1', limit = '20' } = req.query;
-  const pageNum = Math.max(1, parseInt(page as string));
-  const limitNum = Math.min(100, Math.max(1, parseInt(limit as string)));
+  // parseInt returns NaN for non-numeric input; `|| fallback` catches it
+  const pageNum = Math.max(1, parseInt(page as string, 10) || 1);
+  const limitNum = Math.min(100, Math.max(1, parseInt(limit as string, 10) || 20));
   const skip = (pageNum - 1) * limitNum;
 
   const where = {
@@ -140,13 +227,13 @@ bookingsRouter.get('/availability', asyncHandler(async (req, res) => {
     },
   });
 
-  const slotKey = `${LOCK_PREFIX}${start.toISOString()}:${end.toISOString()}`;
-  const lockExists = await redis.exists(slotKey);
+  const bucketKeys = getSlotBucketKeys(start, end);
+  const lockedBuckets = bucketKeys.length > 0 ? await redis.exists(...bucketKeys) : 0;
 
   res.json({
-    available: conflictingBookings === 0 && lockExists === 0,
+    available: conflictingBookings === 0 && lockedBuckets === 0,
     hasConflict: conflictingBookings > 0,
-    hasActiveLock: lockExists === 1,
+    hasActiveLock: lockedBuckets > 0,
     requestedSlot: { startTime: start, endTime: end },
   });
 }));
@@ -191,7 +278,8 @@ bookingsRouter.post('/', requireAuth, asyncHandler(async (req: AuthenticatedRequ
     // ── Phase 2: PostgreSQL serializable transaction ─────────
     // This second layer guarantees atomicity at the DB level,
     // handling any edge case where Redis and Postgres diverge.
-    const booking = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    // Retried on P2034 serialization failures with backoff + jitter.
+    const booking = await runSerializableTransaction(async (tx: Prisma.TransactionClient) => {
       // Re-check for conflicts inside the transaction (serializable isolation)
       const existingConflict = await tx.booking.findFirst({
         where: {
@@ -217,26 +305,21 @@ bookingsRouter.post('/', requireAuth, asyncHandler(async (req: AuthenticatedRequ
           lockExpiresAt: new Date(Date.now() + LOCK_TTL_MS),
         },
       });
-    }, { isolationLevel: 'Serializable' });
+    });
 
     logger.info(`Booking created: ${booking.id} for user ${req.user!.id}`);
 
+    await writeAuditLog('booking', booking.id, 'CREATED', req.user!.id, {
+      serviceType,
+      startTime: startTime.toISOString(),
+      endTime: endTime.toISOString(),
+    });
+
+    sendBookingCreatedEmail(req.user!, booking);
+
     // Emit webhook to n8n for confirmation email workflow
     // (n8n listens on its webhook endpoint)
-    setImmediate(async () => {
-      try {
-        const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL;
-        if (n8nWebhookUrl) {
-          await fetch(`${n8nWebhookUrl}/booking-created`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ bookingId: booking.id, event: 'BOOKING_CREATED' }),
-          });
-        }
-      } catch (err) {
-        logger.warn('Failed to notify n8n of new booking:', err);
-      }
-    });
+    notifyN8n('booking-created', { bookingId: booking.id, event: 'BOOKING_CREATED' });
 
     res.status(201).json({ data: booking, message: 'Booking reserved successfully.' });
   } catch (error) {
@@ -257,14 +340,19 @@ bookingsRouter.post('/', requireAuth, asyncHandler(async (req: AuthenticatedRequ
 }));
 
 // ============================================================
-// PATCH /api/bookings/:id — Update booking status/notes
+// PATCH /api/bookings/:id — Update booking notes
+// Status changes are webhook-only; clients cannot self-confirm.
 // ============================================================
 bookingsRouter.patch('/:id', requireAuth, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
   const validation = UpdateBookingSchema.safeParse(req.body);
 
   if (!validation.success) {
-    res.status(422).json({ error: 'Validation failed', details: validation.error.format() });
+    res.status(422).json({
+      error: 'Validation failed',
+      message: 'Only the notes field can be updated. Booking status is managed by the payment workflow.',
+      details: validation.error.format(),
+    });
     return;
   }
 
@@ -280,6 +368,10 @@ bookingsRouter.patch('/:id', requireAuth, asyncHandler(async (req: Authenticated
   const updated = await prisma.booking.update({
     where: { id },
     data: validation.data,
+  });
+
+  await writeAuditLog('booking', id, 'UPDATED', req.user!.id, {
+    fields: Object.keys(validation.data),
   });
 
   res.json({ data: updated });
@@ -305,7 +397,7 @@ bookingsRouter.delete('/:id', requireAuth, asyncHandler(async (req: Authenticate
     return;
   }
 
-  await prisma.booking.update({
+  const cancelled = await prisma.booking.update({
     where: { id },
     data: { status: BookingStatus.CANCELLED },
   });
@@ -315,21 +407,14 @@ bookingsRouter.delete('/:id', requireAuth, asyncHandler(async (req: Authenticate
     await releaseSlotLock(booking.startTime, booking.endTime, booking.lockToken);
   }
 
-  // Notify n8n for cancellation workflow
-  setImmediate(async () => {
-    try {
-      const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL;
-      if (n8nWebhookUrl) {
-        await fetch(`${n8nWebhookUrl}/booking-cancelled`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ bookingId: id, event: 'BOOKING_CANCELLED' }),
-        });
-      }
-    } catch (err) {
-      logger.warn('Failed to notify n8n of cancellation:', err);
-    }
+  await writeAuditLog('booking', id, 'CANCELLED', req.user!.id, {
+    previousStatus: booking.status,
   });
+
+  sendBookingStatusEmail(req.user!, cancelled);
+
+  // Notify n8n for cancellation workflow
+  notifyN8n('booking-cancelled', { bookingId: id, event: 'BOOKING_CANCELLED' });
 
   res.json({ message: 'Booking cancelled successfully.' });
 }));

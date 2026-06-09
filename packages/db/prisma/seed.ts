@@ -1,6 +1,7 @@
 /**
  * SSD Studio — Database Seed
  * Creates sample users, bookings, and media assets for development.
+ * amountPaid is stored in cents (Int) to avoid floating point errors.
  */
 
 import { PrismaClient, BookingStatus, AssetType, DeliveryStatus } from '@prisma/client';
@@ -11,195 +12,80 @@ const prisma = new PrismaClient();
 async function main() {
   console.log('Seeding database...');
 
-  // Clean existing data
   await prisma.auditLog.deleteMany();
   await prisma.mediaAsset.deleteMany();
   await prisma.booking.deleteMany();
   await prisma.user.deleteMany();
 
-  // Create sample users
-  const hashedPassword = await bcrypt.hash('password123', 12);
+  const hp = await bcrypt.hash('password123', 12);
 
-  const user1 = await prisma.user.create({
-    data: {
-      email: 'alice@example.com',
-      name: 'Alice Johnson',
-      phone: '+1-555-0101',
-      password: hashedPassword,
-    },
-  });
+  // ── 5 Users ──────────────────────────────────────────────
+  const users = await Promise.all([
+    prisma.user.create({ data: { email: 'alice@example.com', name: 'Alice Johnson', phone: '+1-555-0101', password: hp } }),
+    prisma.user.create({ data: { email: 'bob@example.com', name: 'Bob Martinez', phone: '+1-555-0102', password: hp } }),
+    prisma.user.create({ data: { email: 'carol@example.com', name: 'Carol Chen', phone: '+1-555-0103', password: hp } }),
+    prisma.user.create({ data: { email: 'dave@example.com', name: 'Dave Patel', phone: '+1-555-0104', password: hp } }),
+    prisma.user.create({ data: { email: 'emma@example.com', name: 'Emma Wilson', phone: '+1-555-0105', password: hp } }),
+  ]);
+  console.log(`Created ${users.length} users`);
 
-  const user2 = await prisma.user.create({
-    data: {
-      email: 'bob@example.com',
-      name: 'Bob Martinez',
-      phone: '+1-555-0102',
-      password: hashedPassword,
-    },
-  });
-
-  const user3 = await prisma.user.create({
-    data: {
-      email: 'carol@example.com',
-      name: 'Carol Chen',
-      phone: '+1-555-0103',
-      password: hashedPassword,
-    },
-  });
-
-  console.log(`Created 3 users: ${user1.email}, ${user2.email}, ${user3.email}`);
-
-  // Create sample bookings
   const now = new Date();
-  const tomorrow = new Date(now);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  tomorrow.setHours(10, 0, 0, 0);
-  const tomorrowEnd = new Date(tomorrow);
-  tomorrowEnd.setHours(12, 0, 0, 0);
+  const d = (offsetDays: number, hour: number, min = 0) => {
+    const dt = new Date(now);
+    dt.setDate(dt.getDate() + offsetDays);
+    dt.setHours(hour, min, 0, 0);
+    return dt;
+  };
 
-  const nextWeek = new Date(now);
-  nextWeek.setDate(nextWeek.getDate() + 7);
-  nextWeek.setHours(14, 0, 0, 0);
-  const nextWeekEnd = new Date(nextWeek);
-  nextWeekEnd.setHours(16, 0, 0, 0);
+  // ── 12 Bookings across all statuses ──────────────────────
+  const bookings = await Promise.all([
+    // CONFIRMED future bookings
+    prisma.booking.create({ data: { clientId: users[0].id, serviceType: 'PORTRAIT_SESSION', startTime: d(1, 10), endTime: d(1, 12), status: BookingStatus.CONFIRMED, amountPaid: 35000, confirmationSentAt: now, stripePaymentId: 'pi_test_001', notes: 'Outdoor golden hour' } }),
+    prisma.booking.create({ data: { clientId: users[1].id, serviceType: 'COMMERCIAL_SHOOT', startTime: d(3, 14), endTime: d(3, 17), status: BookingStatus.CONFIRMED, amountPaid: 250000, confirmationSentAt: now, stripePaymentId: 'pi_test_002', notes: 'Product catalog for e-commerce' } }),
+    prisma.booking.create({ data: { clientId: users[2].id, serviceType: 'BRAND_CAMPAIGN', startTime: d(5, 9), endTime: d(5, 13), status: BookingStatus.CONFIRMED, amountPaid: 500000, confirmationSentAt: now, stripePaymentId: 'pi_test_003' } }),
+    prisma.booking.create({ data: { clientId: users[3].id, serviceType: 'VIDEO_PRODUCTION', startTime: d(7, 11), endTime: d(7, 15), status: BookingStatus.CONFIRMED, amountPaid: 800000, confirmationSentAt: now, stripePaymentId: 'pi_test_004', notes: 'Documentary short film' } }),
+    // PENDING bookings (not yet paid)
+    prisma.booking.create({ data: { clientId: users[4].id, serviceType: 'EVENT_COVERAGE', startTime: d(10, 16), endTime: d(10, 20), status: BookingStatus.PENDING, amountPaid: 0, notes: 'Music festival coverage' } }),
+    prisma.booking.create({ data: { clientId: users[0].id, serviceType: 'PRODUCT_PHOTOGRAPHY', startTime: d(14, 10), endTime: d(14, 12), status: BookingStatus.PENDING, amountPaid: 0 } }),
+    prisma.booking.create({ data: { clientId: users[1].id, serviceType: 'PORTRAIT_SESSION', startTime: d(21, 13), endTime: d(21, 14), status: BookingStatus.PENDING, amountPaid: 0, notes: 'Headshots for LinkedIn' } }),
+    // COMPLETED past bookings
+    prisma.booking.create({ data: { clientId: users[2].id, serviceType: 'EVENT_COVERAGE', startTime: d(-7, 18), endTime: d(-7, 22), status: BookingStatus.COMPLETED, amountPaid: 120000, confirmationSentAt: d(-8, 10), stripePaymentId: 'pi_test_005', followUpSentAt: d(-5, 10) } }),
+    prisma.booking.create({ data: { clientId: users[3].id, serviceType: 'PORTRAIT_SESSION', startTime: d(-14, 10), endTime: d(-14, 11), status: BookingStatus.COMPLETED, amountPaid: 25000, confirmationSentAt: d(-15, 10), stripePaymentId: 'pi_test_006' } }),
+    prisma.booking.create({ data: { clientId: users[4].id, serviceType: 'COMMERCIAL_SHOOT', startTime: d(-21, 14), endTime: d(-21, 18), status: BookingStatus.COMPLETED, amountPaid: 350000, confirmationSentAt: d(-22, 10), stripePaymentId: 'pi_test_007' } }),
+    // CANCELLED bookings
+    prisma.booking.create({ data: { clientId: users[0].id, serviceType: 'EVENT_COVERAGE', startTime: d(-3, 10), endTime: d(-3, 14), status: BookingStatus.CANCELLED, amountPaid: 0, notes: 'Client rescheduled, no refund needed' } }),
+    prisma.booking.create({ data: { clientId: users[1].id, serviceType: 'BRAND_CAMPAIGN', startTime: d(30, 9), endTime: d(30, 17), status: BookingStatus.CANCELLED, amountPaid: 0, notes: 'Campaign put on hold' } }),
+  ]);
+  console.log(`Created ${bookings.length} bookings`);
 
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  yesterday.setHours(10, 0, 0, 0);
-  const yesterdayEnd = new Date(yesterday);
-  yesterdayEnd.setHours(12, 0, 0, 0);
+  // ── 6 Media assets on completed bookings ──────────────────
+  const assets = await Promise.all([
+    prisma.mediaAsset.create({ data: { bookingId: bookings[7].id, s3ObjectKey: 'raw/event-carol-001/IMG_0001.CR2', assetType: AssetType.UNEDITED, deliveryStatus: DeliveryStatus.DELIVERED, deliveredAt: d(-7, 14), deliveryEmailSent: true, fileName: 'IMG_0001.CR2', fileSizeBytes: 25000000, mimeType: 'image/x-canon-cr2' } }),
+    prisma.mediaAsset.create({ data: { bookingId: bookings[7].id, s3ObjectKey: 'final/event-carol-001/IMG_0001.jpg', assetType: AssetType.FINAL, deliveryStatus: DeliveryStatus.DELIVERED, deliveredAt: d(-5, 10), deliveryEmailSent: true, fileName: 'IMG_0001.jpg', fileSizeBytes: 8000000, mimeType: 'image/jpeg' } }),
+    prisma.mediaAsset.create({ data: { bookingId: bookings[7].id, s3ObjectKey: 'final/event-carol-001/IMG_0042.jpg', assetType: AssetType.FINAL, deliveryStatus: DeliveryStatus.DELIVERED, deliveredAt: d(-5, 10), deliveryEmailSent: true, fileName: 'IMG_0042.jpg', fileSizeBytes: 7500000, mimeType: 'image/jpeg' } }),
+    prisma.mediaAsset.create({ data: { bookingId: bookings[8].id, s3ObjectKey: 'final/portrait-dave-001/headshot_001.jpg', assetType: AssetType.FINAL, deliveryStatus: DeliveryStatus.DELIVERED, deliveredAt: d(-12, 15), deliveryEmailSent: true, fileName: 'headshot_001.jpg', fileSizeBytes: 5000000, mimeType: 'image/jpeg' } }),
+    prisma.mediaAsset.create({ data: { bookingId: bookings[9].id, s3ObjectKey: 'raw/commercial-emma-001/IMG_1001.CR2', assetType: AssetType.UNEDITED, deliveryStatus: DeliveryStatus.DELIVERED, deliveredAt: d(-20, 12), deliveryEmailSent: true, fileName: 'IMG_1001.CR2', fileSizeBytes: 28000000, mimeType: 'image/x-canon-cr2' } }),
+    prisma.mediaAsset.create({ data: { bookingId: bookings[9].id, s3ObjectKey: 'final/commercial-emma-001/product_001.jpg', assetType: AssetType.FINAL, deliveryStatus: DeliveryStatus.DELIVERED, deliveredAt: d(-19, 10), deliveryEmailSent: true, fileName: 'product_001.jpg', fileSizeBytes: 6000000, mimeType: 'image/jpeg' } }),
+  ]);
+  console.log(`Created ${assets.length} media assets`);
 
-  const booking1 = await prisma.booking.create({
-    data: {
-      clientId: user1.id,
-      serviceType: 'PORTRAIT_SESSION',
-      startTime: tomorrow,
-      endTime: tomorrowEnd,
-      status: BookingStatus.CONFIRMED,
-      amountPaid: 350.0,
-      confirmationSentAt: now,
-      notes: 'Outdoor session, golden hour preferred',
-      stripePaymentId: 'pi_test_001',
-    },
-  });
-
-  const booking2 = await prisma.booking.create({
-    data: {
-      clientId: user2.id,
-      serviceType: 'COMMERCIAL_SHOOT',
-      startTime: nextWeek,
-      endTime: nextWeekEnd,
-      status: BookingStatus.PENDING,
-      amountPaid: 0,
-      notes: 'Product photography for e-commerce catalog',
-    },
-  });
-
-  const booking3 = await prisma.booking.create({
-    data: {
-      clientId: user3.id,
-      serviceType: 'EVENT_COVERAGE',
-      startTime: yesterday,
-      endTime: yesterdayEnd,
-      status: BookingStatus.COMPLETED,
-      amountPaid: 1200.0,
-      confirmationSentAt: new Date(yesterday.getTime() - 48 * 60 * 60 * 1000),
-      reminderSent48hAt: new Date(yesterday.getTime() - 48 * 60 * 60 * 1000),
-      reminderSent24hAt: new Date(yesterday.getTime() - 24 * 60 * 60 * 1000),
-      reminderSentDayOfAt: new Date(yesterday.getTime() - 2 * 60 * 60 * 1000),
-      followUpSentAt: new Date(yesterday.getTime() + 24 * 60 * 60 * 1000),
-      stripePaymentId: 'pi_test_002',
-    },
-  });
-
-  console.log(`Created 3 bookings: ${booking1.id}, ${booking2.id}, ${booking3.id}`);
-
-  // Create sample media assets for the completed booking
-  const media1 = await prisma.mediaAsset.create({
-    data: {
-      bookingId: booking3.id,
-      s3ObjectKey: 'raw/event-carol-001/IMG_0001.CR2',
-      assetType: AssetType.UNEDITED,
-      deliveryStatus: DeliveryStatus.DELIVERED,
-      deliveredAt: new Date(yesterday.getTime() + 4 * 60 * 60 * 1000),
-      deliveryEmailSent: true,
-      fileName: 'IMG_0001.CR2',
-      fileSizeBytes: 25_000_000,
-      mimeType: 'image/x-canon-cr2',
-    },
-  });
-
-  const media2 = await prisma.mediaAsset.create({
-    data: {
-      bookingId: booking3.id,
-      s3ObjectKey: 'final/event-carol-001/IMG_0001-edit.jpg',
-      assetType: AssetType.FINAL,
-      deliveryStatus: DeliveryStatus.DELIVERED,
-      deliveredAt: new Date(yesterday.getTime() + 48 * 60 * 60 * 1000),
-      deliveryEmailSent: true,
-      fileName: 'IMG_0001-edit.jpg',
-      fileSizeBytes: 8_000_000,
-      mimeType: 'image/jpeg',
-    },
-  });
-
-  console.log(`Created 2 media assets: ${media1.id}, ${media2.id}`);
-
-  // Create audit log entries
+  // ── Audit log entries ────────────────────────────────────
   await prisma.auditLog.createMany({
-    data: [
-      {
-        entityType: 'booking',
-        entityId: booking1.id,
-        action: 'CREATED',
-        actorId: user1.id,
-        metadata: { serviceType: 'PORTRAIT_SESSION' },
-      },
-      {
-        entityType: 'booking',
-        entityId: booking1.id,
-        action: 'CONFIRMED',
-        actorId: user1.id,
-        metadata: { amountPaid: 350 },
-      },
-      {
-        entityType: 'booking',
-        entityId: booking3.id,
-        action: 'CREATED',
-        actorId: user3.id,
-        metadata: { serviceType: 'EVENT_COVERAGE' },
-      },
-      {
-        entityType: 'booking',
-        entityId: booking3.id,
-        action: 'COMPLETED',
-        actorId: user3.id,
-        metadata: { totalMedia: 2 },
-      },
-      {
-        entityType: 'media',
-        entityId: media2.id,
-        action: 'DELIVERED',
-        actorId: null,
-        metadata: { assetType: 'FINAL', deliveryEmailSent: true },
-      },
-    ],
+    data: bookings.map((b) => ({
+      entityType: 'booking',
+      entityId: b.id,
+      action: b.status === 'CANCELLED' ? 'CANCELLED' : 'CREATED',
+      actorId: b.clientId,
+      metadata: { serviceType: b.serviceType, amountPaid: b.amountPaid },
+    })),
   });
+  console.log(`Created ${bookings.length} audit log entries`);
 
-  console.log('Created 5 audit log entries');
-  console.log('Seed complete!');
-  console.log('');
-  console.log('Login credentials:');
-  console.log('  alice@example.com / password123');
-  console.log('  bob@example.com / password123');
-  console.log('  carol@example.com / password123');
+  console.log('\nSeed complete!');
+  console.log('\nLogin credentials (all use password: password123):');
+  users.forEach((u) => console.log(`  ${u.email}`));
 }
 
 main()
-  .catch((e) => {
-    console.error('Seed error:', e);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+  .catch((e) => { console.error('Seed error:', e); process.exit(1); })
+  .finally(async () => await prisma.$disconnect());
