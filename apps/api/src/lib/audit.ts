@@ -1,10 +1,8 @@
 /**
- * SSD Studio — Audit Logging
- * Writes lifecycle events to the audit_logs table.
- * Failures are logged but never break the request that triggered them.
+ * SSD Studio — Audit Log Helper
+ * Centralized audit log writing to avoid duplication across routes.
  */
 
-import { Prisma } from '@prisma/client';
 import { prisma } from './prisma';
 import { logger } from './logger';
 
@@ -13,13 +11,20 @@ export async function writeAuditLog(
   entityId: string,
   action: string,
   actorId: string | null,
-  metadata?: Prisma.InputJsonValue
+  metadata?: Record<string, unknown>
 ): Promise<void> {
   try {
     await prisma.auditLog.create({
-      data: { entityType, entityId, action, actorId, metadata },
+      data: {
+        entityType,
+        entityId,
+        action,
+        actorId,
+        metadata: metadata as any,
+      },
     });
-  } catch (err) {
-    logger.error(`Failed to write audit log (${entityType}/${entityId} ${action}):`, err);
+  } catch (error) {
+    // Audit logging should never break the main operation
+    logger.error(`Failed to write audit log (${action} on ${entityType}:${entityId}):`, error);
   }
 }

@@ -21,7 +21,12 @@ const LoginSchema = z.object({
 });
 
 authRouter.post('/register', asyncHandler(async (req: Request, res: Response) => {
-  const data = RegisterSchema.parse(req.body);
+  const validation = RegisterSchema.safeParse(req.body);
+  if (!validation.success) {
+    res.status(422).json({ error: 'Validation failed', details: validation.error.format() });
+    return;
+  }
+  const data = validation.data;
   const existing = await prisma.user.findUnique({ where: { email: data.email } });
   if (existing) {
     res.status(409).json({ error: 'Email already registered' });
@@ -43,7 +48,12 @@ authRouter.post('/register', asyncHandler(async (req: Request, res: Response) =>
 }));
 
 authRouter.post('/login', asyncHandler(async (req: Request, res: Response) => {
-  const data = LoginSchema.parse(req.body);
+  const validation = LoginSchema.safeParse(req.body);
+  if (!validation.success) {
+    res.status(422).json({ error: 'Validation failed', details: validation.error.format() });
+    return;
+  }
+  const data = validation.data;
   const user = await prisma.user.findUnique({ where: { email: data.email } });
   if (!user || !user.password) {
     res.status(401).json({ error: 'Invalid email or password' });
@@ -71,7 +81,13 @@ authRouter.get('/me', asyncHandler(async (req: Request, res: Response) => {
     return;
   }
   const token = authHeader.substring(7);
-  const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { sub: string; email: string; name: string };
+  let decoded: { sub: string; email: string; name: string };
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET!) as { sub: string; email: string; name: string };
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' });
+    return;
+  }
   const user = await prisma.user.findUnique({ where: { id: decoded.sub }, select: { id: true, email: true, name: true, phone: true } });
   if (!user) {
     res.status(401).json({ error: 'User not found' });

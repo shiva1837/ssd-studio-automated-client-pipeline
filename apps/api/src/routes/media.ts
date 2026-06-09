@@ -1,40 +1,59 @@
 /**
  * SSD Studio — Media Routes
- * Handles S3 presigned URL generation for secure media upload/download.
+ * Real S3 presigned URL generation: GetObjectCommand for downloads,
+ * PutObjectCommand for uploads, signed via @aws-sdk/s3-request-presigner.
  */
 
 import { Router, Response } from 'express';
 import asyncHandler from 'express-async-handler';
-import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { z } from 'zod';
+import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
+import { writeAuditLog } from '../lib/audit';
 import { requireAuth, AuthenticatedRequest } from '../middleware/auth';
+import { AssetType, DeliveryStatus } from '@prisma/client';
 
 export const mediaRouter = Router();
 
-// ============================================================
-// S3 CLIENT (lazy init)
-// ============================================================
+// Region + credentials come from the standard AWS env vars
+// (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) via the default provider chain.
+const s3 = new S3Client({ region: process.env.AWS_REGION || 'us-east-1' });
 
-function getS3Client() {
-  const { S3Client } = require('@aws-sdk/client-s3');
-  return new S3Client({
-    region: process.env.AWS_REGION || 'us-east-1',
-    credentials: {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
-    },
-  });
+const DOWNLOAD_URL_EXPIRY = Number(process.env.S3_PRESIGNED_URL_EXPIRY_SECONDS || 86400);
+const UPLOAD_URL_EXPIRY = 3600;
+const BUCKET_RAW = process.env.S3_BUCKET_RAW || 'ssd-studio-raw-assets';
+const BUCKET_FINAL = process.env.S3_BUCKET_FINAL || 'ssd-studio-final-assets';
+
+function bucketForAsset(assetType: AssetType): string {
+  return assetType === AssetType.FINAL ? BUCKET_FINAL : BUCKET_RAW;
 }
 
-const PRESIGNED_URL_EXPIRY = Number(process.env.S3_PRESIGNED_URL_EXPIRY_SECONDS || 86400);
+const BookingIdSchema = z.string().uuid();
+
+const UploadUrlSchema = z.object({
+  bookingId: z.string().uuid(),
+  fileName: z.string().min(1).max(255).regex(/^[^/\\]+$/, 'fileName must not contain path separators'),
+  fileType: z.string().min(1).max(100).regex(/^[\w.+-]+\/[\w.+-]+$/, 'fileType must be a valid MIME type'),
+  assetType: z.nativeEnum(AssetType).optional().default(AssetType.UNEDITED),
+});
+
+const NotifyDeliverySchema = z.object({
+  assetId: z.string().uuid(),
+});
 
 // ============================================================
 // GET /api/media/:bookingId — List media assets for a booking
+// Returns fresh presigned download URLs for every asset.
 // ============================================================
 mediaRouter.get('/:bookingId', requireAuth, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-  const { bookingId } = req.params;
+  const bookingIdCheck = BookingIdSchema.safeParse(req.params.bookingId);
+  if (!bookingIdCheck.success) {
+    res.status(400).json({ error: 'bookingId must be a valid UUID' });
+    return;
+  }
+  const bookingId = bookingIdCheck.data;
 
   const booking = await prisma.booking.findFirst({
     where: { id: bookingId, clientId: req.user!.id },
@@ -46,36 +65,34 @@ mediaRouter.get('/:bookingId', requireAuth, asyncHandler(async (req: Authenticat
     return;
   }
 
-  // Generate fresh presigned download URLs for each asset
+  // Reuse cached presigned URLs while valid; regenerate the rest
   const assetsWithUrls = await Promise.all(
     booking.mediaAssets.map(async (asset) => {
       if (asset.presignedUrl && asset.presignedUrlExpiry && asset.presignedUrlExpiry > new Date()) {
-        return asset; // URL still valid
+        return asset;
       }
 
       try {
-        const s3 = getS3Client();
-        const bucket = asset.assetType === 'FINAL'
-          ? process.env.S3_BUCKET_FINAL
-          : process.env.S3_BUCKET_RAW;
-
         const command = new GetObjectCommand({
-          Bucket: bucket,
+          Bucket: bucketForAsset(asset.assetType),
           Key: asset.s3ObjectKey,
+          ResponseContentDisposition: asset.fileName
+            ? `attachment; filename="${asset.fileName}"`
+            : undefined,
         });
 
-        const url = await getSignedUrl(s3, command, { expiresIn: PRESIGNED_URL_EXPIRY });
+        const url = await getSignedUrl(s3, command, { expiresIn: DOWNLOAD_URL_EXPIRY });
 
-        // Cache the URL
-        const updated = await prisma.mediaAsset.update({
+        return await prisma.mediaAsset.update({
           where: { id: asset.id },
           data: {
             presignedUrl: url,
-            presignedUrlExpiry: new Date(Date.now() + PRESIGNED_URL_EXPIRY * 1000),
+            presignedUrlExpiry: new Date(Date.now() + DOWNLOAD_URL_EXPIRY * 1000),
+            ...(asset.deliveryStatus === DeliveryStatus.PENDING
+              ? { deliveryStatus: DeliveryStatus.URL_GENERATED }
+              : {}),
           },
         });
-
-        return updated;
       } catch (error) {
         logger.error(`Failed to generate presigned URL for asset ${asset.id}:`, error);
         return { ...asset, presignedUrl: null, presignedUrlExpiry: null };
@@ -87,15 +104,16 @@ mediaRouter.get('/:bookingId', requireAuth, asyncHandler(async (req: Authenticat
 }));
 
 // ============================================================
-// POST /api/media/upload-url — Generate presigned URL for upload
+// POST /api/media/upload-url — Presigned PUT URL for uploads
 // ============================================================
 mediaRouter.post('/upload-url', requireAuth, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-  const { bookingId, fileName, fileType, assetType } = req.body;
-
-  if (!bookingId || !fileName || !fileType) {
-    res.status(400).json({ error: 'bookingId, fileName, and fileType are required' });
+  const validation = UploadUrlSchema.safeParse(req.body);
+  if (!validation.success) {
+    res.status(422).json({ error: 'Validation failed', details: validation.error.format() });
     return;
   }
+
+  const { bookingId, fileName, fileType, assetType } = validation.data;
 
   // Verify booking exists and belongs to user
   const booking = await prisma.booking.findFirst({
@@ -107,61 +125,52 @@ mediaRouter.post('/upload-url', requireAuth, asyncHandler(async (req: Authentica
     return;
   }
 
-  const bucket = assetType === 'FINAL'
-    ? process.env.S3_BUCKET_FINAL
-    : process.env.S3_BUCKET_RAW;
+  const key = `${assetType.toLowerCase()}/${bookingId}/${Date.now()}-${fileName}`;
 
-  if (!bucket) {
-    res.status(500).json({ error: 'S3 bucket not configured' });
-    return;
-  }
+  const command = new PutObjectCommand({
+    Bucket: bucketForAsset(assetType),
+    Key: key,
+    ContentType: fileType,
+  });
 
-  const key = `${assetType?.toLowerCase() || 'raw'}/${bookingId}/${Date.now()}-${fileName}`;
+  const uploadUrl = await getSignedUrl(s3, command, { expiresIn: UPLOAD_URL_EXPIRY });
 
-  try {
-    const s3 = getS3Client();
-    const command = new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      ContentType: fileType,
-    });
+  const asset = await prisma.mediaAsset.create({
+    data: {
+      bookingId,
+      s3ObjectKey: key,
+      assetType,
+      fileName,
+      mimeType: fileType,
+    },
+  });
 
-    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour for upload
+  await writeAuditLog('media', asset.id, 'UPLOAD_URL_GENERATED', req.user!.id, {
+    bookingId,
+    s3ObjectKey: key,
+    fileType,
+  });
 
-    // Create media asset record
-    const asset = await prisma.mediaAsset.create({
-      data: {
-        bookingId,
-        s3ObjectKey: key,
-        assetType: assetType || 'UNEDITED',
-        fileName,
-        mimeType: fileType,
-      },
-    });
+  logger.info(`Presigned upload URL generated for booking ${bookingId}, asset ${asset.id}`);
 
-    logger.info(`Presigned upload URL generated for booking ${bookingId}, asset ${asset.id}`);
-
-    res.json({
-      uploadUrl,
-      assetId: asset.id,
-      expiresIn: 3600,
-    });
-  } catch (error) {
-    logger.error('Failed to generate presigned upload URL:', error);
-    res.status(500).json({ error: 'Failed to generate upload URL' });
-  }
+  res.status(201).json({
+    uploadUrl,
+    assetId: asset.id,
+    expiresIn: UPLOAD_URL_EXPIRY,
+  });
 }));
 
 // ============================================================
 // POST /api/media/notify-delivery — Called when media is delivered
 // ============================================================
 mediaRouter.post('/notify-delivery', requireAuth, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-  const { assetId } = req.body;
-
-  if (!assetId) {
-    res.status(400).json({ error: 'assetId is required' });
+  const validation = NotifyDeliverySchema.safeParse(req.body);
+  if (!validation.success) {
+    res.status(422).json({ error: 'Validation failed', details: validation.error.format() });
     return;
   }
+
+  const { assetId } = validation.data;
 
   const asset = await prisma.mediaAsset.findFirst({
     where: { id: assetId },
@@ -182,20 +191,15 @@ mediaRouter.post('/notify-delivery', requireAuth, asyncHandler(async (req: Authe
   const updated = await prisma.mediaAsset.update({
     where: { id: assetId },
     data: {
-      deliveryStatus: 'DELIVERED',
+      deliveryStatus: DeliveryStatus.DELIVERED,
       deliveredAt: new Date(),
       deliveryEmailSent: true,
     },
   });
 
-  await prisma.auditLog.create({
-    data: {
-      entityType: 'media',
-      entityId: assetId,
-      action: 'DELIVERED',
-      actorId: req.user!.id,
-      metadata: { assetType: asset.assetType, fileName: asset.fileName },
-    },
+  await writeAuditLog('media', assetId, 'DELIVERED', req.user!.id, {
+    assetType: asset.assetType,
+    fileName: asset.fileName,
   });
 
   res.json({ data: updated });
