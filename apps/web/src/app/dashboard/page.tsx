@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle, Badge, Button } from '@ssd-studio/ui';
 import Header from '@/components/Header';
 import Footer from '@/components/Footer';
+import Skeleton from '@/components/Skeleton';
 import { getToken } from '@/lib/auth';
 import { useGetMyBookingsQuery } from '@/store/api';
 
@@ -51,8 +52,23 @@ export default function DashboardPage() {
         </div>
 
         {isLoading ? (
-          <div className="text-center py-12">
-            <p className="text-muted-foreground">Loading your bookings...</p>
+          <div className="space-y-4">
+            {[0, 1, 2].map((i) => (
+              <Card key={i}>
+                <CardHeader className="pb-3">
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-2">
+                      <Skeleton className="h-5 w-44" />
+                      <Skeleton className="h-4 w-72" />
+                    </div>
+                    <Skeleton className="h-6 w-24" />
+                  </div>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <Skeleton className="h-4 w-56" />
+                </CardContent>
+              </Card>
+            ))}
           </div>
         ) : bookings.length === 0 ? (
           <Card>
