@@ -121,7 +121,9 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      # curl is not installed in python:3.12-slim and the MCP server has no
+      # HTTP /health route (health is an MCP tool) — probe the socket instead
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8080), timeout=5).close()"]
       interval: 30s
       timeout: 10s
       retries: 3
