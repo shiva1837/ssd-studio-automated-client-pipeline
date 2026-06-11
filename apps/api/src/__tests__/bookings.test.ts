@@ -17,6 +17,7 @@ jest.mock('../lib/prisma', () => ({
       findFirst: jest.fn(),
       count: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
     $transaction: jest.fn(),
   },
@@ -56,6 +57,7 @@ const mockedPrisma = prisma as unknown as {
     findFirst: jest.Mock;
     count: jest.Mock;
     update: jest.Mock;
+    updateMany: jest.Mock;
   };
   $transaction: jest.Mock;
 };
@@ -134,6 +136,15 @@ describe('GET /api/bookings', () => {
   it('rejects unauthenticated requests', async () => {
     const res = await request(app).get('/api/bookings');
     expect(res.status).toBe(401);
+  });
+
+  it('rejects an invalid status filter with 400 instead of a Prisma 500', async () => {
+    const res = await request(app)
+      .get('/api/bookings?status=BOGUS')
+      .set('Authorization', AUTH);
+
+    expect(res.status).toBe(400);
+    expect(mockedPrisma.booking.findMany).not.toHaveBeenCalled();
   });
 });
 
@@ -245,6 +256,17 @@ describe('POST /api/bookings', () => {
 
     expect(res.status).toBe(400);
   });
+
+  it('rejects ranges longer than the duration cap (Redis key-explosion guard)', async () => {
+    const res = await request(app).post('/api/bookings').set('Authorization', AUTH).send({
+      ...payload,
+      startTime: START.toISOString(),
+      endTime: new Date('2031-06-01T10:00:00.000Z').toISOString(), // one year
+    });
+
+    expect(res.status).toBe(400);
+    expect(mockedRedis.set).not.toHaveBeenCalled();
+  });
 });
 
 describe('PATCH /api/bookings/:id', () => {
@@ -289,14 +311,14 @@ describe('PATCH /api/bookings/:id', () => {
 describe('DELETE /api/bookings/:id', () => {
   it('cancels an owned booking, releases the lock, and notifies', async () => {
     mockedPrisma.booking.findFirst.mockResolvedValue(BOOKING);
-    mockedPrisma.booking.update.mockResolvedValue({ ...BOOKING, status: 'CANCELLED' });
+    mockedPrisma.booking.updateMany.mockResolvedValue({ count: 1 });
 
     const res = await request(app)
       .delete(`/api/bookings/${BOOKING.id}`)
       .set('Authorization', AUTH);
 
     expect(res.status).toBe(200);
-    expect(mockedPrisma.booking.update).toHaveBeenCalledWith(
+    expect(mockedPrisma.booking.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: { status: 'CANCELLED' } })
     );
     // Lock release runs the compare-and-delete Lua script
@@ -315,7 +337,19 @@ describe('DELETE /api/bookings/:id', () => {
       .set('Authorization', AUTH);
 
     expect(res.status).toBe(400);
-    expect(mockedPrisma.booking.update).not.toHaveBeenCalled();
+    expect(mockedPrisma.booking.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('returns 409 when the booking completes between check and write (race guard)', async () => {
+    mockedPrisma.booking.findFirst.mockResolvedValue(BOOKING);
+    mockedPrisma.booking.updateMany.mockResolvedValue({ count: 0 });
+
+    const res = await request(app)
+      .delete(`/api/bookings/${BOOKING.id}`)
+      .set('Authorization', AUTH);
+
+    expect(res.status).toBe(409);
+    expect(sendBookingStatusEmail).not.toHaveBeenCalled();
   });
 
   it('returns 404 for bookings the user does not own', async () => {

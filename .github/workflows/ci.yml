@@ -54,6 +54,12 @@ jobs:
           cd packages/db
           DATABASE_URL="postgresql://ssd_user:ssd_password@localhost:5432/ssd_studio_db" npx prisma db push
 
+      - name: Type-check API
+        run: cd apps/api && npx tsc --noEmit -p tsconfig.json
+
+      - name: Lint API
+        run: cd apps/api && npm run lint
+
       - name: Build API
         run: cd apps/api && npm run build
 
