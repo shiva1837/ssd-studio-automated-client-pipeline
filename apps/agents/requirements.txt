@@ -3,5 +3,3 @@ asyncpg>=0.29.0
 python-dotenv>=1.0.0
 uvicorn>=0.30.0
 httpx>=0.27.0
-hmac>=0.0.1
-hashlib>=0.0.1
