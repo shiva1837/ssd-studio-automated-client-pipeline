@@ -1,18 +1,20 @@
 {
+  "id": "ssdMediaDelivery01",
   "name": "SSD Studio — Media Delivery",
   "nodes": [
     {
       "parameters": {
         "httpMethod": "POST",
         "path": "s3-upload",
-        "responseMode": "responseNode",
+        "responseMode": "onReceived",
         "options": {}
       },
       "id": "webhook-s3-upload",
       "name": "Webhook: S3 Upload",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [250, 300]
+      "position": [250, 300],
+      "webhookId": "f1e2d3c4-b5a6-4987-8def-s3uploadhook1"
     },
     {
       "parameters": {

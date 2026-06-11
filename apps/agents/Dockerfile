@@ -9,9 +9,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Healthcheck
+# Healthcheck: the MCP server only exposes the SSE endpoint (health is an
+# MCP tool, not an HTTP route), so probe the listening socket instead.
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')" || exit 1
+  CMD python -c "import socket; socket.create_connection(('localhost', 8080), timeout=5).close()" || exit 1
 
 EXPOSE 8080
 
