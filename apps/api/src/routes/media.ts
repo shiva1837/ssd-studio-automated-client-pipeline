@@ -32,6 +32,13 @@ function bucketForAsset(assetType: AssetType): string {
 
 const BookingIdSchema = z.string().uuid();
 
+// fileSizeBytes is a Prisma BigInt; res.json (JSON.stringify) throws a
+// TypeError on bigint values, so convert before serializing. File sizes
+// fit comfortably in a JS number.
+function toJsonSafeAsset<T extends { fileSizeBytes: bigint | null }>(asset: T) {
+  return { ...asset, fileSizeBytes: asset.fileSizeBytes === null ? null : Number(asset.fileSizeBytes) };
+}
+
 const UploadUrlSchema = z.object({
   bookingId: z.string().uuid(),
   fileName: z.string().min(1).max(255).regex(/^[^/\\]+$/, 'fileName must not contain path separators'),
@@ -100,7 +107,7 @@ mediaRouter.get('/:bookingId', requireAuth, asyncHandler(async (req: Authenticat
     })
   );
 
-  res.json({ data: assetsWithUrls });
+  res.json({ data: assetsWithUrls.map(toJsonSafeAsset) });
 }));
 
 // ============================================================
@@ -202,5 +209,5 @@ mediaRouter.post('/notify-delivery', requireAuth, asyncHandler(async (req: Authe
     fileName: asset.fileName,
   });
 
-  res.json({ data: updated });
+  res.json({ data: toJsonSafeAsset(updated) });
 }));

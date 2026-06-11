@@ -44,8 +44,10 @@ async function handlePaymentSucceeded(paymentIntent: any): Promise<void> {
     return;
   }
 
-  const confirmed = await prisma.booking.update({
-    where: { id: bookingId },
+  // Guarded write: never resurrect a booking the client cancelled (or one
+  // already completed) just because a payment event arrived late.
+  const { count } = await prisma.booking.updateMany({
+    where: { id: bookingId, status: { notIn: [BookingStatus.CANCELLED, BookingStatus.COMPLETED] } },
     data: {
       status: BookingStatus.CONFIRMED,
       stripePaymentId: paymentIntent.id,
@@ -54,6 +56,26 @@ async function handlePaymentSucceeded(paymentIntent: any): Promise<void> {
       confirmationSentAt: new Date(),
     },
   });
+
+  if (count === 0) {
+    logger.warn(
+      `Payment ${paymentIntent.id} received for ${booking.status} booking ${bookingId} — status NOT changed, flag for manual refund`
+    );
+    await writeAuditLog('booking', bookingId, 'PAYMENT_FOR_INACTIVE_BOOKING', null, {
+      stripePaymentId: paymentIntent.id,
+      bookingStatus: booking.status,
+      amountPaidCents: paymentIntent.amount_received,
+      source: 'stripe_webhook',
+    });
+    return;
+  }
+
+  const confirmed = {
+    ...booking,
+    status: BookingStatus.CONFIRMED,
+    stripePaymentId: paymentIntent.id,
+    amountPaid: paymentIntent.amount_received,
+  };
 
   logger.info(`Booking ${bookingId} CONFIRMED via Stripe payment ${paymentIntent.id}`);
 
@@ -95,6 +117,20 @@ async function handleChargeRefunded(charge: any): Promise<void> {
 
   if (!booking) {
     logger.warn(`charge.refunded ${charge.id} matches no booking (payment ${paymentIntentId})`);
+    return;
+  }
+
+  // Stripe emits charge.refunded for PARTIAL refunds too; charge.refunded
+  // (the boolean field) is only true once the charge is fully refunded.
+  if (charge.refunded !== true) {
+    logger.info(
+      `Partial refund of ${charge.amount_refunded} cents for booking ${booking.id} — status unchanged`
+    );
+    await writeAuditLog('booking', booking.id, 'PARTIAL_REFUND', null, {
+      chargeId: charge.id,
+      amountRefundedCents: charge.amount_refunded,
+      source: 'stripe_webhook',
+    });
     return;
   }
 

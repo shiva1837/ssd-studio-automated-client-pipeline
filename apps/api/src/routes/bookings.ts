@@ -45,6 +45,10 @@ const UpdateBookingSchema = z
 const LOCK_TTL_MS = Number(process.env.BOOKING_LOCK_TTL_SECONDS || 300) * 1000;
 const LOCK_PREFIX = 'booking:slot:lock:';
 const SLOT_BUCKET_MS = Number(process.env.BOOKING_SLOT_DURATION_MINUTES || 60) * 60 * 1000;
+// Caps the bucket count per request — an unbounded range (e.g. 1970→3000)
+// would otherwise generate millions of Redis keys from a single call.
+const MAX_BOOKING_DURATION_HOURS = Number(process.env.MAX_BOOKING_DURATION_HOURS || 24);
+const MAX_BOOKING_DURATION_MS = MAX_BOOKING_DURATION_HOURS * 60 * 60 * 1000;
 
 /**
  * Discretizes a time range into fixed slot buckets so overlapping ranges
@@ -171,6 +175,14 @@ bookingsRouter.get('/', requireAuth, asyncHandler(async (req: AuthenticatedReque
   const limitNum = Math.min(100, Math.max(1, parseInt(limit as string, 10) || 20));
   const skip = (pageNum - 1) * limitNum;
 
+  // An arbitrary string cast to the Prisma enum would throw a 500 in the query
+  if (status && !Object.values(BookingStatus).includes(status as BookingStatus)) {
+    res.status(400).json({
+      error: `Invalid status. Must be one of: ${Object.values(BookingStatus).join(', ')}`,
+    });
+    return;
+  }
+
   const where = {
     clientId: req.user!.id,
     ...(status ? { status: status as BookingStatus } : {}),
@@ -217,6 +229,13 @@ bookingsRouter.get('/availability', asyncHandler(async (req, res) => {
     return;
   }
 
+  if (end <= start || end.getTime() - start.getTime() > MAX_BOOKING_DURATION_MS) {
+    res.status(400).json({
+      error: `Requested range must be positive and at most ${MAX_BOOKING_DURATION_HOURS} hours`,
+    });
+    return;
+  }
+
   // Check for overlapping confirmed/pending bookings
   const conflictingBookings = await prisma.booking.count({
     where: {
@@ -255,6 +274,13 @@ bookingsRouter.post('/', requireAuth, asyncHandler(async (req: AuthenticatedRequ
 
   if (endTime <= startTime) {
     res.status(400).json({ error: 'endTime must be after startTime' });
+    return;
+  }
+
+  if (endTime.getTime() - startTime.getTime() > MAX_BOOKING_DURATION_MS) {
+    res.status(400).json({
+      error: `Booking duration cannot exceed ${MAX_BOOKING_DURATION_HOURS} hours`,
+    });
     return;
   }
 
@@ -397,10 +423,20 @@ bookingsRouter.delete('/:id', requireAuth, asyncHandler(async (req: Authenticate
     return;
   }
 
-  const cancelled = await prisma.booking.update({
-    where: { id },
+  // Guarded write: the webhook may move this booking to COMPLETED between
+  // the check above and this update. updateMany with a status condition
+  // makes the transition atomic.
+  const { count } = await prisma.booking.updateMany({
+    where: { id, clientId: req.user!.id, status: { not: BookingStatus.COMPLETED } },
     data: { status: BookingStatus.CANCELLED },
   });
+
+  if (count === 0) {
+    res.status(409).json({ error: 'Booking can no longer be cancelled' });
+    return;
+  }
+
+  const cancelled = { ...booking, status: BookingStatus.CANCELLED };
 
   // Release the slot lock if it exists
   if (booking.lockToken) {

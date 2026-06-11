@@ -3,6 +3,7 @@ import asyncHandler from 'express-async-handler';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
 
@@ -33,10 +34,21 @@ authRouter.post('/register', asyncHandler(async (req: Request, res: Response) =>
     return;
   }
   const hashedPassword = await bcrypt.hash(data.password, 12);
-  const user = await prisma.user.create({
-    data: { email: data.email, name: data.name, phone: data.phone, password: hashedPassword },
-    select: { id: true, email: true, name: true, phone: true, createdAt: true },
-  });
+  let user;
+  try {
+    user = await prisma.user.create({
+      data: { email: data.email, name: data.name, phone: data.phone, password: hashedPassword },
+      select: { id: true, email: true, name: true, phone: true, createdAt: true },
+    });
+  } catch (err) {
+    // Two concurrent registrations can both pass the findUnique check; the
+    // unique constraint (P2002) is the authoritative duplicate detector.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      res.status(409).json({ error: 'Email already registered' });
+      return;
+    }
+    throw err;
+  }
   const jwtSecret: jwt.Secret = process.env.JWT_SECRET!;
   const token = jwt.sign(
     { sub: user.id, email: user.email, name: user.name },

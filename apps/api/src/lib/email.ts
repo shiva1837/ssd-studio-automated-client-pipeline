@@ -21,11 +21,15 @@ interface BookingEmailData {
 }
 
 function formatSlot(booking: BookingEmailData): string {
+  // timeZoneName labels the rendered time so recipients are not misled by
+  // whatever timezone the server happens to run in.
   const start = booking.startTime.toLocaleString('en-US', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
     hour: 'numeric', minute: '2-digit',
   });
-  const end = booking.endTime.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit' });
+  const end = booking.endTime.toLocaleString('en-US', {
+    hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+  });
   return `${start} – ${end}`;
 }
 
