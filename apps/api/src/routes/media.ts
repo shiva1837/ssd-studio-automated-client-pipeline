@@ -19,7 +19,14 @@ export const mediaRouter = Router();
 
 // Region + credentials come from the standard AWS env vars
 // (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) via the default provider chain.
-const s3 = new S3Client({ region: process.env.AWS_REGION || 'us-east-1' });
+// S3_ENDPOINT switches to an S3-compatible store (MinIO locally); those need
+// path-style addressing because bucket-subdomain DNS does not resolve there.
+const s3 = new S3Client({
+  region: process.env.AWS_REGION || 'us-east-1',
+  ...(process.env.S3_ENDPOINT
+    ? { endpoint: process.env.S3_ENDPOINT, forcePathStyle: true }
+    : {}),
+});
 
 const DOWNLOAD_URL_EXPIRY = Number(process.env.S3_PRESIGNED_URL_EXPIRY_SECONDS || 86400);
 const UPLOAD_URL_EXPIRY = 3600;

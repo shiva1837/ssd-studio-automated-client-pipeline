@@ -345,7 +345,15 @@ bookingsRouter.post('/', requireAuth, asyncHandler(async (req: AuthenticatedRequ
 
     // Emit webhook to n8n for confirmation email workflow
     // (n8n listens on its webhook endpoint)
-    notifyN8n('booking-created', { bookingId: booking.id, event: 'BOOKING_CREATED' });
+    notifyN8n('booking-created', {
+      bookingId: booking.id,
+      event: 'BOOKING_CREATED',
+      clientEmail: req.user!.email,
+      clientName: req.user!.name,
+      serviceType,
+      startTime: startTime.toISOString(),
+      endTime: endTime.toISOString(),
+    });
 
     res.status(201).json({ data: booking, message: 'Booking reserved successfully.' });
   } catch (error) {
@@ -450,7 +458,13 @@ bookingsRouter.delete('/:id', requireAuth, asyncHandler(async (req: Authenticate
   sendBookingStatusEmail(req.user!, cancelled);
 
   // Notify n8n for cancellation workflow
-  notifyN8n('booking-cancelled', { bookingId: id, event: 'BOOKING_CANCELLED' });
+  notifyN8n('booking-cancelled', {
+    bookingId: id,
+    event: 'BOOKING_CANCELLED',
+    clientEmail: req.user!.email,
+    clientName: req.user!.name,
+    serviceType: booking.serviceType,
+  });
 
   res.json({ message: 'Booking cancelled successfully.' });
 }));

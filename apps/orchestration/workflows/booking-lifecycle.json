@@ -18,7 +18,8 @@
     },
     {
       "parameters": {
-        "fromEmail": "={{$env[\"EMAIL_FROM\"]}}",
+        "emailFormat": "html",
+        "fromEmail": "SSD Studio <onboarding@resend.dev>",
         "toEmail": "={{$node[\"Webhook: Booking Created\"].json.body.clientEmail || \"client@example.com\"}}",
         "subject": "Booking Confirmed — SSD Studio",
         "html": "<h1>Your booking is confirmed!</h1><p>Thank you for choosing SSD Studio. We'll send you a preparation guide 48 hours before your session.</p>"
@@ -27,6 +28,7 @@
       "name": "Send Confirmation Email",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2,
+      "credentials": { "smtp": { "id": "resendSmtpCred0001", "name": "Resend SMTP" } },
       "position": [650, 300]
     },
     {
@@ -43,7 +45,8 @@
     },
     {
       "parameters": {
-        "fromEmail": "={{$env[\"EMAIL_FROM\"]}}",
+        "emailFormat": "html",
+        "fromEmail": "SSD Studio <onboarding@resend.dev>",
         "toEmail": "={{$node[\"Webhook: Booking Created\"].json.body.clientEmail || \"client@example.com\"}}",
         "subject": "Preparation Guide — Your SSD Studio Session",
         "html": "<h1>Getting Ready for Your Session</h1><p>Here's everything you need to know: what to wear, where to park, and how to prepare.</p>"
@@ -52,6 +55,7 @@
       "name": "Send Preparation Guide",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2,
+      "credentials": { "smtp": { "id": "resendSmtpCred0001", "name": "Resend SMTP" } },
       "position": [1050, 300]
     },
     {
@@ -68,7 +72,8 @@
     },
     {
       "parameters": {
-        "fromEmail": "={{$env[\"EMAIL_FROM\"]}}",
+        "emailFormat": "html",
+        "fromEmail": "SSD Studio <onboarding@resend.dev>",
         "toEmail": "={{$node[\"Webhook: Booking Created\"].json.body.clientEmail || \"client@example.com\"}}",
         "subject": "Final Timeline — See You Tomorrow!",
         "html": "<h1>Your Session is Tomorrow</h1><p>Here's your exact timeline, parking instructions, and access details.</p>"
@@ -77,6 +82,7 @@
       "name": "Send Final Timeline",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2,
+      "credentials": { "smtp": { "id": "resendSmtpCred0001", "name": "Resend SMTP" } },
       "position": [1450, 300]
     },
     {
@@ -93,7 +99,8 @@
     },
     {
       "parameters": {
-        "fromEmail": "={{$env[\"EMAIL_FROM\"]}}",
+        "emailFormat": "html",
+        "fromEmail": "SSD Studio <onboarding@resend.dev>",
         "toEmail": "={{$node[\"Webhook: Booking Created\"].json.body.clientEmail || \"client@example.com\"}}",
         "subject": "See You Soon — Day-of Reminder",
         "html": "<h1>Your session is in 2 hours!</h1><p>Don't forget: parking details and access code inside.</p>"
@@ -102,6 +109,7 @@
       "name": "Send Day-of Reminder",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2,
+      "credentials": { "smtp": { "id": "resendSmtpCred0001", "name": "Resend SMTP" } },
       "position": [1850, 300]
     }
   ],

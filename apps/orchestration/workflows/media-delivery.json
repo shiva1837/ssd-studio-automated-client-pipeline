@@ -46,7 +46,8 @@
     },
     {
       "parameters": {
-        "fromEmail": "={{$env[\"EMAIL_FROM\"]}}",
+        "emailFormat": "html",
+        "fromEmail": "SSD Studio <onboarding@resend.dev>",
         "toEmail": "={{$node[\"Webhook: S3 Upload\"].json.body.clientEmail || \"client@example.com\"}}",
         "subject": "Your Media is Ready — SSD Studio",
         "html": "<h1>Your media is ready for download!</h1><p>Click the link below to access your files. The link expires in 72 hours.</p><p><a href='{{$node[\"Generate Presigned URL\"].json.body.downloadUrl}}'>Download Now</a></p>"
@@ -55,6 +56,7 @@
       "name": "Send Delivery Email",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2,
+      "credentials": { "smtp": { "id": "resendSmtpCred0001", "name": "Resend SMTP" } },
       "position": [650, 300]
     },
     {
@@ -71,7 +73,8 @@
     },
     {
       "parameters": {
-        "fromEmail": "={{$env[\"EMAIL_FROM\"]}}",
+        "emailFormat": "html",
+        "fromEmail": "SSD Studio <onboarding@resend.dev>",
         "toEmail": "={{$node[\"Webhook: S3 Upload\"].json.body.clientEmail || \"client@example.com\"}}",
         "subject": "How Was Your Experience? — SSD Studio",
         "html": "<h1>We'd Love Your Feedback</h1><p>Your session is complete! Please take a moment to leave us a review.</p><p><a href='{{$env[\"REVIEW_URL\"]}}'>Leave a Review</a></p>"
@@ -80,6 +83,7 @@
       "name": "Send Follow-up + Review Request",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2,
+      "credentials": { "smtp": { "id": "resendSmtpCred0001", "name": "Resend SMTP" } },
       "position": [1050, 300]
     }
   ],
