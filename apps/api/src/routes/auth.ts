@@ -3,6 +3,7 @@ import asyncHandler from 'express-async-handler';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
 
@@ -21,17 +22,33 @@ const LoginSchema = z.object({
 });
 
 authRouter.post('/register', asyncHandler(async (req: Request, res: Response) => {
-  const data = RegisterSchema.parse(req.body);
+  const validation = RegisterSchema.safeParse(req.body);
+  if (!validation.success) {
+    res.status(422).json({ error: 'Validation failed', details: validation.error.format() });
+    return;
+  }
+  const data = validation.data;
   const existing = await prisma.user.findUnique({ where: { email: data.email } });
   if (existing) {
     res.status(409).json({ error: 'Email already registered' });
     return;
   }
   const hashedPassword = await bcrypt.hash(data.password, 12);
-  const user = await prisma.user.create({
-    data: { email: data.email, name: data.name, phone: data.phone, password: hashedPassword },
-    select: { id: true, email: true, name: true, phone: true, createdAt: true },
-  });
+  let user;
+  try {
+    user = await prisma.user.create({
+      data: { email: data.email, name: data.name, phone: data.phone, password: hashedPassword },
+      select: { id: true, email: true, name: true, phone: true, createdAt: true },
+    });
+  } catch (err) {
+    // Two concurrent registrations can both pass the findUnique check; the
+    // unique constraint (P2002) is the authoritative duplicate detector.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      res.status(409).json({ error: 'Email already registered' });
+      return;
+    }
+    throw err;
+  }
   const jwtSecret: jwt.Secret = process.env.JWT_SECRET!;
   const token = jwt.sign(
     { sub: user.id, email: user.email, name: user.name },
@@ -43,7 +60,12 @@ authRouter.post('/register', asyncHandler(async (req: Request, res: Response) =>
 }));
 
 authRouter.post('/login', asyncHandler(async (req: Request, res: Response) => {
-  const data = LoginSchema.parse(req.body);
+  const validation = LoginSchema.safeParse(req.body);
+  if (!validation.success) {
+    res.status(422).json({ error: 'Validation failed', details: validation.error.format() });
+    return;
+  }
+  const data = validation.data;
   const user = await prisma.user.findUnique({ where: { email: data.email } });
   if (!user || !user.password) {
     res.status(401).json({ error: 'Invalid email or password' });
@@ -71,7 +93,13 @@ authRouter.get('/me', asyncHandler(async (req: Request, res: Response) => {
     return;
   }
   const token = authHeader.substring(7);
-  const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { sub: string; email: string; name: string };
+  let decoded: { sub: string; email: string; name: string };
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET!) as { sub: string; email: string; name: string };
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' });
+    return;
+  }
   const user = await prisma.user.findUnique({ where: { id: decoded.sub }, select: { id: true, email: true, name: true, phone: true } });
   if (!user) {
     res.status(401).json({ error: 'User not found' });

@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main, fix/**, feat/**]
+  pull_request:
+    branches: [main]
+
+jobs:
+  api:
+    name: API — Build & Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ssd_user
+          POSTGRES_PASSWORD: ssd_password
+          POSTGRES_DB: ssd_studio_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci --legacy-peer-deps
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema=packages/db/prisma/schema.prisma
+
+      - name: Push schema
+        run: |
+          cd packages/db
+          DATABASE_URL="postgresql://ssd_user:ssd_password@localhost:5432/ssd_studio_db" npx prisma db push
+
+      - name: Type-check API
+        run: cd apps/api && npx tsc --noEmit -p tsconfig.json
+
+      - name: Lint API
+        run: cd apps/api && npm run lint
+
+      - name: Build API
+        run: cd apps/api && npm run build
+
+      - name: Run API tests
+        run: cd apps/api && npm test
+        env:
+          DATABASE_URL: postgresql://ssd_user:ssd_password@localhost:5432/ssd_studio_db
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: ci-test-secret-key
+          NODE_ENV: test
+
+  web:
+    name: Web — Build & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci --legacy-peer-deps
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema=packages/db/prisma/schema.prisma
+
+      - name: Build Web
+        run: cd apps/web && npm run build

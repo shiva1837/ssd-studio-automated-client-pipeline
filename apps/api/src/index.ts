@@ -5,7 +5,7 @@
  */
 
 import 'dotenv/config';
-import express, { Application, Request, Response, NextFunction } from 'express';
+import express, { Application, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -15,6 +15,7 @@ import { authRouter } from './routes/auth';
 import { bookingsRouter } from './routes/bookings';
 import { webhooksRouter } from './routes/webhooks';
 import { mediaRouter } from './routes/media';
+import { analyticsRouter } from './routes/analytics';
 import { prisma } from './lib/prisma';
 import { logger } from './lib/logger';
 import { errorHandler } from './middleware/errorHandler';
@@ -24,6 +25,9 @@ const app: Application = express();
 const PORT = process.env.API_PORT || 4000;
 const HOST = process.env.API_HOST || '0.0.0.0';
 
+// Trust proxy (for correct rate limiting behind reverse proxy)
+app.set('trust proxy', 1);
+
 // ============================================================
 // SECURITY MIDDLEWARE
 // ============================================================
@@ -32,7 +36,7 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      connectSrc: ["'self'", process.env.FRONTEND_URL || ''],
+      connectSrc: ["'self'", ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])],
     },
   },
 }));
@@ -71,17 +75,6 @@ const authLimiter = rateLimit({
   message: { error: 'Too many authentication attempts, please try again later.' },
 });
 
-app.use('/api', globalLimiter);
-app.use('/api/auth', authLimiter);
-
-// ============================================================
-// REQUEST PARSING
-// ============================================================
-// Note: webhooks need raw body for Stripe signature verification
-app.use('/api/webhooks', express.raw({ type: 'application/json' }));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
 // ============================================================
 // LOGGING
 // ============================================================
@@ -90,6 +83,26 @@ app.use(morgan('combined', {
     write: (message: string) => logger.http(message.trim()),
   },
 }));
+
+// ============================================================
+// WEBHOOKS — mounted BEFORE the global rate limiter
+// ============================================================
+// Stripe retries aggressively; rate-limiting its callbacks drops payment
+// events. The raw body parser is scoped here because signature verification
+// needs the unparsed payload (express.json would consume it).
+app.use('/api/webhooks', express.raw({ type: 'application/json' }), webhooksRouter);
+
+// ============================================================
+// RATE LIMITING (webhooks above are exempt)
+// ============================================================
+app.use('/api/auth', authLimiter);
+app.use('/api', globalLimiter);
+
+// ============================================================
+// REQUEST PARSING
+// ============================================================
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ============================================================
 // HEALTH CHECK
@@ -118,8 +131,8 @@ app.get('/health', async (_req: Request, res: Response) => {
 // ============================================================
 app.use('/api/auth', authRouter);
 app.use('/api/bookings', bookingsRouter);
-app.use('/api/webhooks', webhooksRouter);
 app.use('/api/media', mediaRouter);
+app.use('/api/analytics', analyticsRouter);
 
 // ============================================================
 // ERROR HANDLING

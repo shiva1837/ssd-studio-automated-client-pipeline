@@ -8,8 +8,10 @@ import os
 import hmac
 import hashlib
 import json
+import random
 import secrets
 import asyncio
+import uuid as uuid_lib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -24,17 +26,39 @@ load_dotenv()
 # ============================================================
 
 DB_POOL: Optional[asyncpg.Pool] = None
+DB_POOL_MAX_RETRIES = 5
 
 
 async def get_db_pool() -> asyncpg.Pool:
+    """Create (or return) the connection pool, retrying transient failures
+    with exponential backoff + jitter so a slow-starting Postgres container
+    does not kill the agent."""
     global DB_POOL
     if DB_POOL is None:
-        DB_POOL = await asyncpg.create_pool(
-            dsn=os.environ["DATABASE_URL"],
-            min_size=2,
-            max_size=10,
-            command_timeout=10,
-        )
+        last_error: Optional[Exception] = None
+        for attempt in range(1, DB_POOL_MAX_RETRIES + 1):
+            try:
+                DB_POOL = await asyncpg.create_pool(
+                    dsn=os.environ["DATABASE_URL"],
+                    min_size=2,
+                    max_size=10,
+                    command_timeout=10,
+                )
+                break
+            except (OSError, asyncpg.PostgresError) as e:
+                last_error = e
+                if attempt == DB_POOL_MAX_RETRIES:
+                    break
+                delay = min(2 ** attempt, 30) + random.uniform(0, 1)
+                print(
+                    f"DB pool creation failed (attempt {attempt}/{DB_POOL_MAX_RETRIES}): {e}. "
+                    f"Retrying in {delay:.1f}s"
+                )
+                await asyncio.sleep(delay)
+        if DB_POOL is None:
+            raise ConnectionError(
+                f"Could not create database pool after {DB_POOL_MAX_RETRIES} attempts: {last_error}"
+            )
     return DB_POOL
 
 
@@ -46,6 +70,31 @@ async def close_db_pool():
 
 
 # ============================================================
+# INPUT VALIDATION
+# ============================================================
+
+VALID_BOOKING_STATUSES = {"PENDING", "CONFIRMED", "COMPLETED", "CANCELLED"}
+
+
+def _invalid_uuid(value: Any, field: str) -> Optional[dict]:
+    """Return an error dict if value is not a valid UUID, else None."""
+    try:
+        uuid_lib.UUID(str(value))
+        return None
+    except (ValueError, TypeError):
+        return {"error": f"Invalid UUID format for {field}: {value!r}"}
+
+
+def _invalid_iso_datetime(value: Any, field: str) -> Optional[dict]:
+    """Return an error dict if value is not an ISO 8601 datetime, else None."""
+    try:
+        datetime.fromisoformat(str(value))
+        return None
+    except (ValueError, TypeError):
+        return {"error": f"Invalid ISO 8601 datetime for {field}: {value!r}"}
+
+
+# ============================================================
 # HITL CRYPTOGRAPHIC SAFEGUARDS
 # ============================================================
 
@@ -54,6 +103,19 @@ HITL_TOKEN_EXPIRY: int = int(os.environ.get("HITL_TOKEN_EXPIRY_SECONDS", "300"))
 
 # In-memory challenge store (use Redis in production)
 _challenge_store: dict[str, dict] = {}
+
+
+def _purge_expired_challenges() -> None:
+    """On-access cleanup: drop expired HITL challenges so the in-memory
+    store cannot grow unbounded."""
+    now = datetime.now(timezone.utc)
+    expired = [
+        token
+        for token, challenge in _challenge_store.items()
+        if datetime.fromisoformat(challenge["expires_at"]) < now
+    ]
+    for token in expired:
+        _challenge_store.pop(token, None)
 
 
 def _generate_challenge_token() -> str:
@@ -81,6 +143,7 @@ async def request_hitl_challenge(operation: str, entity_id: str) -> dict[str, An
     Generate a HITL challenge token for an irreversible operation.
     The human operator must sign this challenge to authorize execution.
     """
+    _purge_expired_challenges()
     token = _generate_challenge_token()
     signature = _sign_challenge(token, operation, entity_id)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=HITL_TOKEN_EXPIRY)
@@ -108,6 +171,7 @@ async def verify_and_consume_challenge(
     challenge_token: str, operation: str, entity_id: str, signature: str
 ) -> bool:
     """Verify + consume a HITL challenge (one-time use, replay-resistant)."""
+    _purge_expired_challenges()
     stored = _challenge_store.pop(challenge_token, None)
     if not stored:
         return False
@@ -162,6 +226,11 @@ async def list_bookings(
         limit: Maximum records to return (default 20, max 100).
         offset: Number of records to skip for pagination.
     """
+    if status is not None and status not in VALID_BOOKING_STATUSES:
+        return {
+            "error": f"Invalid status {status!r}. Must be one of: {sorted(VALID_BOOKING_STATUSES)}"
+        }
+
     limit = min(max(limit, 1), 100)
     offset = max(offset, 0)
 
@@ -206,6 +275,9 @@ async def get_booking(booking_id: str) -> dict[str, Any]:
     Args:
         booking_id: UUID of the booking to retrieve.
     """
+    if err := _invalid_uuid(booking_id, "booking_id"):
+        return err
+
     pool = await get_db_pool()
 
     booking = await pool.fetchrow(
@@ -244,6 +316,9 @@ async def request_reschedule_challenge(booking_id: str) -> dict[str, Any]:
     Args:
         booking_id: UUID of the booking to reschedule.
     """
+    if err := _invalid_uuid(booking_id, "booking_id"):
+        return err
+
     pool = await get_db_pool()
     booking = await pool.fetchrow(
         "SELECT id, status FROM bookings WHERE id = $1", booking_id
@@ -275,6 +350,15 @@ async def reschedule_shoot(
         challenge_token: Token from request_reschedule_challenge.
         signature: HMAC signature from the challenge response.
     """
+    # Validate inputs BEFORE consuming the one-time challenge so a malformed
+    # request does not burn a valid authorization.
+    if err := _invalid_uuid(booking_id, "booking_id"):
+        return {"success": False, **err}
+    if err := _invalid_iso_datetime(new_start_time, "new_start_time"):
+        return {"success": False, **err}
+    if err := _invalid_iso_datetime(new_end_time, "new_end_time"):
+        return {"success": False, **err}
+
     # Verify HITL challenge
     if not await verify_and_consume_challenge(
         challenge_token, "RESCHEDULE", booking_id, signature
@@ -349,6 +433,9 @@ async def request_cancellation_challenge(booking_id: str) -> dict[str, Any]:
     Args:
         booking_id: UUID of the booking to cancel.
     """
+    if err := _invalid_uuid(booking_id, "booking_id"):
+        return err
+
     pool = await get_db_pool()
     booking = await pool.fetchrow(
         "SELECT id, status FROM bookings WHERE id = $1", booking_id
@@ -381,6 +468,11 @@ async def execute_cancellation(
         signature: HMAC signature from the challenge response.
         reason: Human-provided reason for cancellation.
     """
+    # Validate inputs BEFORE consuming the one-time challenge so a malformed
+    # request does not burn a valid authorization.
+    if err := _invalid_uuid(booking_id, "booking_id"):
+        return {"success": False, **err}
+
     # Verify HITL challenge
     if not await verify_and_consume_challenge(
         challenge_token, "CANCEL", booking_id, signature

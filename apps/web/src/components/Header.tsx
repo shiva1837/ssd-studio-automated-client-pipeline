@@ -10,7 +10,7 @@ export default function Header() {
 
   const handleLogout = () => {
     removeToken();
-    router.push('/');
+    router.push('/login');
   };
 
   return (
