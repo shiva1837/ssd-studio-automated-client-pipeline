@@ -108,7 +108,7 @@ export const ssdApi = createApi({
     }),
     updateBooking: builder.mutation<
       { data: Booking },
-      { id: string; status?: string; notes?: string }
+      { id: string; notes?: string }
     >({
       query: ({ id, ...body }) => ({
         url: `/bookings/${id}`,
