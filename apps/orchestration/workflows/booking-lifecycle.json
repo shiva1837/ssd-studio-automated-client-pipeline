@@ -7,7 +7,14 @@
         "httpMethod": "POST",
         "path": "booking-created",
         "responseMode": "onReceived",
-        "options": {}
+        "options": {
+          "rawBody": true
+        },
+        "authentication": "headerAuth",
+        "headerAuth": {
+          "name": "X-Internal-Secret",
+          "value": "={{$env[\"N8N_INTERNAL_SECRET\"]}}"
+        }
       },
       "id": "webhook-booking-created",
       "name": "Webhook: Booking Created",
@@ -19,98 +26,209 @@
     {
       "parameters": {
         "emailFormat": "html",
-        "fromEmail": "SSD Studio <onboarding@resend.dev>",
-        "toEmail": "={{$node[\"Webhook: Booking Created\"].json.body.clientEmail || \"client@example.com\"}}",
-        "subject": "Booking Confirmed — SSD Studio",
-        "html": "<h1>Your booking is confirmed!</h1><p>Thank you for choosing SSD Studio. We'll send you a preparation guide 48 hours before your session.</p>"
+        "fromEmail": "={{$env[\"EMAIL_FROM\"] || \"SSD Studio <noreply@ssdstudio.com>\"}}",
+        "toEmail": "={{$json.body.clientEmail}}",
+        "subject": "Booking Received — SSD Studio",
+        "html": "<h1>Your booking request is received!</h1><p>Hi {{$json.body.clientName}},</p><p>Thank you for choosing SSD Studio. Your session is scheduled for <strong>{{$json.body.startTime}}</strong>.</p><p>We'll send you a preparation guide 48 hours before your session.</p><p>Reference: {{$json.body.bookingId}}</p>"
       },
       "id": "email-confirmation",
       "name": "Send Confirmation Email",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2,
       "credentials": { "smtp": { "id": "resendSmtpCred0001", "name": "Resend SMTP" } },
-      "position": [650, 300]
+      "position": [500, 300]
     },
     {
       "parameters": {
-        "amount": 48,
-        "unit": "hours"
+        "resume": "specificTime",
+        "dateTime": "={{new Date(new Date($json.body.startTime).getTime() - 48 * 60 * 60 * 1000).toISOString()}}"
       },
-      "id": "wait-48h",
-      "name": "Wait 48h",
+      "id": "wait-until-48h-before",
+      "name": "Wait Until 48h Before Session",
       "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [750, 300],
+      "webhookId": "wait-48h-before"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{$env[\"API_BASE_URL\"]}}/api/bookings/{{$node[\"Webhook: Booking Created\"].json.body.bookingId}}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Internal-Secret", "value": "={{$env[\"N8N_INTERNAL_SECRET\"]}}" }
+          ]
+        }
+      },
+      "id": "check-status-48h",
+      "name": "Check Booking Status (48h)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [950, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.data.status}}",
+              "operation": "notEqual",
+              "value2": "CANCELLED"
+            }
+          ]
+        }
+      },
+      "id": "if-not-cancelled-48h",
+      "name": "If Not Cancelled (48h)",
+      "type": "n8n-nodes-base.if",
       "typeVersion": 1,
-      "position": [850, 300],
-      "webhookId": "wait-48h"
+      "position": [1150, 300]
     },
     {
       "parameters": {
         "emailFormat": "html",
-        "fromEmail": "SSD Studio <onboarding@resend.dev>",
-        "toEmail": "={{$node[\"Webhook: Booking Created\"].json.body.clientEmail || \"client@example.com\"}}",
+        "fromEmail": "={{$env[\"EMAIL_FROM\"] || \"SSD Studio <noreply@ssdstudio.com>\"}}",
+        "toEmail": "={{$node[\"Webhook: Booking Created\"].json.body.clientEmail}}",
         "subject": "Preparation Guide — Your SSD Studio Session",
-        "html": "<h1>Getting Ready for Your Session</h1><p>Here's everything you need to know: what to wear, where to park, and how to prepare.</p>"
+        "html": "<h1>Getting Ready for Your Session</h1><p>Hi {{$node[\"Webhook: Booking Created\"].json.body.clientName}},</p><p>Your session is in 48 hours! Here's everything you need to know:</p><ul><li><strong>What to wear:</strong> Choose comfortable clothes that reflect your style.</li><li><strong>Where to park:</strong> Free parking available in Lot B.</li><li><strong>Arrival:</strong> Please arrive 10 minutes early.</li></ul>"
       },
       "id": "email-prep-guide",
       "name": "Send Preparation Guide",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2,
       "credentials": { "smtp": { "id": "resendSmtpCred0001", "name": "Resend SMTP" } },
-      "position": [1050, 300]
+      "position": [1400, 200]
     },
     {
       "parameters": {
-        "amount": 24,
-        "unit": "hours"
+        "resume": "specificTime",
+        "dateTime": "={{new Date(new Date($node[\"Webhook: Booking Created\"].json.body.startTime).getTime() - 24 * 60 * 60 * 1000).toISOString()}}"
       },
-      "id": "wait-24h",
-      "name": "Wait 24h",
+      "id": "wait-until-24h-before",
+      "name": "Wait Until 24h Before Session",
       "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1600, 200],
+      "webhookId": "wait-24h-before"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{$env[\"API_BASE_URL\"]}}/api/bookings/{{$node[\"Webhook: Booking Created\"].json.body.bookingId}}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Internal-Secret", "value": "={{$env[\"N8N_INTERNAL_SECRET\"]}}" }
+          ]
+        }
+      },
+      "id": "check-status-24h",
+      "name": "Check Booking Status (24h)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1800, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.data.status}}",
+              "operation": "notEqual",
+              "value2": "CANCELLED"
+            }
+          ]
+        }
+      },
+      "id": "if-not-cancelled-24h",
+      "name": "If Not Cancelled (24h)",
+      "type": "n8n-nodes-base.if",
       "typeVersion": 1,
-      "position": [1250, 300],
-      "webhookId": "wait-24h"
+      "position": [2000, 200]
     },
     {
       "parameters": {
         "emailFormat": "html",
-        "fromEmail": "SSD Studio <onboarding@resend.dev>",
-        "toEmail": "={{$node[\"Webhook: Booking Created\"].json.body.clientEmail || \"client@example.com\"}}",
+        "fromEmail": "={{$env[\"EMAIL_FROM\"] || \"SSD Studio <noreply@ssdstudio.com>\"}}",
+        "toEmail": "={{$node[\"Webhook: Booking Created\"].json.body.clientEmail}}",
         "subject": "Final Timeline — See You Tomorrow!",
-        "html": "<h1>Your Session is Tomorrow</h1><p>Here's your exact timeline, parking instructions, and access details.</p>"
+        "html": "<h1>Your Session is Tomorrow</h1><p>Hi {{$node[\"Webhook: Booking Created\"].json.body.clientName}},</p><p>Here's your exact timeline, parking instructions, and studio access details for tomorrow's session.</p><p><strong>Time:</strong> {{$node[\"Webhook: Booking Created\"].json.body.startTime}}</p>"
       },
       "id": "email-final-timeline",
       "name": "Send Final Timeline",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2,
       "credentials": { "smtp": { "id": "resendSmtpCred0001", "name": "Resend SMTP" } },
-      "position": [1450, 300]
+      "position": [2250, 100]
     },
     {
       "parameters": {
-        "amount": 2,
-        "unit": "hours"
+        "resume": "specificTime",
+        "dateTime": "={{new Date(new Date($node[\"Webhook: Booking Created\"].json.body.startTime).getTime() - 2 * 60 * 60 * 1000).toISOString()}}"
       },
-      "id": "wait-2h",
-      "name": "Wait 2h (Day-of)",
+      "id": "wait-until-2h-before",
+      "name": "Wait Until 2h Before Session",
       "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2450, 100],
+      "webhookId": "wait-2h-before"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{$env[\"API_BASE_URL\"]}}/api/bookings/{{$node[\"Webhook: Booking Created\"].json.body.bookingId}}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Internal-Secret", "value": "={{$env[\"N8N_INTERNAL_SECRET\"]}}" }
+          ]
+        }
+      },
+      "id": "check-status-2h",
+      "name": "Check Booking Status (2h)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2650, 100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.data.status}}",
+              "operation": "notEqual",
+              "value2": "CANCELLED"
+            }
+          ]
+        }
+      },
+      "id": "if-not-cancelled-2h",
+      "name": "If Not Cancelled (2h)",
+      "type": "n8n-nodes-base.if",
       "typeVersion": 1,
-      "position": [1650, 300],
-      "webhookId": "wait-2h"
+      "position": [2850, 100]
     },
     {
       "parameters": {
         "emailFormat": "html",
-        "fromEmail": "SSD Studio <onboarding@resend.dev>",
-        "toEmail": "={{$node[\"Webhook: Booking Created\"].json.body.clientEmail || \"client@example.com\"}}",
+        "fromEmail": "={{$env[\"EMAIL_FROM\"] || \"SSD Studio <noreply@ssdstudio.com>\"}}",
+        "toEmail": "={{$node[\"Webhook: Booking Created\"].json.body.clientEmail}}",
         "subject": "See You Soon — Day-of Reminder",
-        "html": "<h1>Your session is in 2 hours!</h1><p>Don't forget: parking details and access code inside.</p>"
+        "html": "<h1>Your session is in 2 hours!</h1><p>Hi {{$node[\"Webhook: Booking Created\"].json.body.clientName}},</p><p>We're excited to see you soon! Don't forget:</p><ul><li>Parking: Lot B (free)</li><li>Studio access code will be texted 30 minutes before</li></ul>"
       },
       "id": "email-dayof-reminder",
       "name": "Send Day-of Reminder",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2,
       "credentials": { "smtp": { "id": "resendSmtpCred0001", "name": "Resend SMTP" } },
-      "position": [1850, 300]
+      "position": [3100, 50]
     }
   ],
   "connections": {
@@ -118,22 +236,49 @@
       "main": [[{ "node": "Send Confirmation Email", "type": "main", "index": 0 }]]
     },
     "Send Confirmation Email": {
-      "main": [[{ "node": "Wait 48h", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Wait Until 48h Before Session", "type": "main", "index": 0 }]]
     },
-    "Wait 48h": {
-      "main": [[{ "node": "Send Preparation Guide", "type": "main", "index": 0 }]]
+    "Wait Until 48h Before Session": {
+      "main": [[{ "node": "Check Booking Status (48h)", "type": "main", "index": 0 }]]
+    },
+    "Check Booking Status (48h)": {
+      "main": [[{ "node": "If Not Cancelled (48h)", "type": "main", "index": 0 }]]
+    },
+    "If Not Cancelled (48h)": {
+      "main": [
+        [{ "node": "Send Preparation Guide", "type": "main", "index": 0 }],
+        []
+      ]
     },
     "Send Preparation Guide": {
-      "main": [[{ "node": "Wait 24h", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Wait Until 24h Before Session", "type": "main", "index": 0 }]]
     },
-    "Wait 24h": {
-      "main": [[{ "node": "Send Final Timeline", "type": "main", "index": 0 }]]
+    "Wait Until 24h Before Session": {
+      "main": [[{ "node": "Check Booking Status (24h)", "type": "main", "index": 0 }]]
+    },
+    "Check Booking Status (24h)": {
+      "main": [[{ "node": "If Not Cancelled (24h)", "type": "main", "index": 0 }]]
+    },
+    "If Not Cancelled (24h)": {
+      "main": [
+        [{ "node": "Send Final Timeline", "type": "main", "index": 0 }],
+        []
+      ]
     },
     "Send Final Timeline": {
-      "main": [[{ "node": "Wait 2h (Day-of)", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Wait Until 2h Before Session", "type": "main", "index": 0 }]]
     },
-    "Wait 2h (Day-of)": {
-      "main": [[{ "node": "Send Day-of Reminder", "type": "main", "index": 0 }]]
+    "Wait Until 2h Before Session": {
+      "main": [[{ "node": "Check Booking Status (2h)", "type": "main", "index": 0 }]]
+    },
+    "Check Booking Status (2h)": {
+      "main": [[{ "node": "If Not Cancelled (2h)", "type": "main", "index": 0 }]]
+    },
+    "If Not Cancelled (2h)": {
+      "main": [
+        [{ "node": "Send Day-of Reminder", "type": "main", "index": 0 }],
+        []
+      ]
     }
   },
   "settings": {
